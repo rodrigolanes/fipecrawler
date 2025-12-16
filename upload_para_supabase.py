@@ -91,8 +91,8 @@ class SupabaseUploader:
         ]
         
         try:
-            # Upsert em lote
-            self.supabase.table('marcas').upsert(data).execute()
+            # Upsert em lote (on_conflict especifica a coluna única)
+            self.supabase.table('marcas').upsert(data, on_conflict='codigo').execute()
             print(f"   ✅ {len(data)} registros enviados")
             return len(data)
         except Exception as e:
@@ -139,7 +139,8 @@ class SupabaseUploader:
             ]
             
             try:
-                self.supabase.table('modelos').upsert(data).execute()
+                # Upsert especificando as colunas da constraint única
+                self.supabase.table('modelos').upsert(data, on_conflict='codigo,codigo_marca').execute()
                 enviados += len(data)
                 print(f"   📤 {enviados}/{total} registros enviados ({enviados*100//total}%)")
             except Exception as e:
@@ -193,7 +194,8 @@ class SupabaseUploader:
             ]
             
             try:
-                self.supabase.table('anos_combustivel').upsert(data).execute()
+                # Upsert especificando a coluna única
+                self.supabase.table('anos_combustivel').upsert(data, on_conflict='codigo').execute()
                 enviados += len(data)
                 print(f"   📤 {enviados}/{total} registros enviados ({enviados*100//total}%)")
             except Exception as e:
@@ -245,7 +247,8 @@ class SupabaseUploader:
             ]
             
             try:
-                self.supabase.table('modelos_anos').upsert(data).execute()
+                # Upsert especificando as colunas da constraint única
+                self.supabase.table('modelos_anos').upsert(data, on_conflict='codigo_marca,codigo_modelo,codigo_ano_combustivel').execute()
                 enviados += len(data)
                 print(f"   📤 {enviados}/{total} registros enviados ({enviados*100//total}%)")
             except Exception as e:
@@ -311,7 +314,8 @@ class SupabaseUploader:
             ]
             
             try:
-                self.supabase.table('valores_fipe').upsert(data).execute()
+                # Upsert com constraint única criada
+                self.supabase.table('valores_fipe').upsert(data, on_conflict='codigo_marca,codigo_modelo,ano_modelo,codigo_combustivel,mes_referencia').execute()
                 enviados += len(data)
                 print(f"   📤 {enviados}/{total} registros enviados ({enviados*100//total}%)")
             except Exception as e:
