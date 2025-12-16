@@ -1,9 +1,46 @@
 import requests
 import json
 import urllib3
+import time
 
 # Desabilita avisos de SSL (apenas para desenvolvimento)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Sessão global compartilhada para manter cookies
+_session = None
+
+def get_session():
+    """Retorna sessão compartilhada com cookies e headers configurados"""
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        
+        # Headers padrão que imitam navegador real
+        _session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Referer": "https://veiculos.fipe.org.br/",
+            "Origin": "https://veiculos.fipe.org.br",
+            "X-Requested-With": "XMLHttpRequest",
+            "sec-ch-ua": '"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin"
+        })
+        
+        # Cookies que imitam visita real ao site
+        _session.cookies.set("_ga", "GA1.3.1274497137.1765802022", domain=".fipe.org.br")
+        _session.cookies.set("_gid", "GA1.3.478016371.1765802022", domain=".fipe.org.br")
+        _session.cookies.set("_gcl_au", "1.1.788238918.1765802022", domain=".fipe.org.br")
+        _session.cookies.set("ROUTEID", ".5", domain="veiculos.fipe.org.br")
+        
+    return _session
 
 
 def buscar_tabela_referencia():
@@ -15,15 +52,10 @@ def buscar_tabela_referencia():
         list: Lista de tabelas de referência com Codigo e Mes
     """
     url = "https://veiculos.fipe.org.br/api/veiculos/ConsultarTabelaDeReferencia"
-    
-    headers = {
-        "Content-Type": "application/json",
-        "Referer": "https://veiculos.fipe.org.br/",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    session = get_session()
     
     try:
-        response = requests.post(url, headers=headers, verify=False)
+        response = session.post(url, json={}, verify=False)
         response.raise_for_status()
         
         tabelas = response.json()
@@ -56,24 +88,15 @@ def buscar_marcas_carros():
     """
     print("🌐 Buscando marcas da API da FIPE...")
     url = "https://veiculos.fipe.org.br/api/veiculos/ConsultarMarcas"
+    session = get_session()
     
-    # Headers para simular um navegador
-    headers = {
-        "Content-Type": "application/json",
-        "Referer": "https://veiculos.fipe.org.br/",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    
-    # Parâmetros da requisição
-    # codigoTabelaReferencia: obtido dinamicamente (mês/ano mais recente)
-    # codigoTipoVeiculo: 1 (carros), 2 (motos), 3 (caminhões)
     payload = {
         "codigoTabelaReferencia": obter_codigo_referencia_atual(),
         "codigoTipoVeiculo": 1
     }
     
     try:
-        # Fazendo a requisição POST
+        response = session.post(url, json=payload, verify=False)
         # verify=False desabilita verificação SSL (usar apenas em desenvolvimento)
         response = requests.post(url, json=payload, headers=headers, verify=False)
         response.raise_for_status()  # Levanta exceção se houver erro HTTP
@@ -103,12 +126,7 @@ def buscar_modelos(codigo_marca):
     # A API retorna tanto Modelos quanto Anos em uma única requisição
     print(f"🌐 Buscando modelos da marca {codigo_marca} da API da FIPE...")
     url = "https://veiculos.fipe.org.br/api/veiculos/ConsultarModelos"
-    
-    headers = {
-        "Content-Type": "application/json",
-        "Referer": "https://veiculos.fipe.org.br/",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    session = get_session()
     
     payload = {
         "codigoTipoVeiculo": 1,
@@ -117,7 +135,7 @@ def buscar_modelos(codigo_marca):
     }
     
     try:
-        response = requests.post(url, json=payload, headers=headers, verify=False)
+        response = session.post(url, json=payload, verify=False)
         response.raise_for_status()
         
         dados = response.json()
@@ -142,12 +160,7 @@ def buscar_anos_modelo(codigo_marca, codigo_modelo):
     """
     print(f"🌐 Buscando anos do modelo {codigo_modelo} da API da FIPE...")
     url = "https://veiculos.fipe.org.br/api/veiculos/ConsultarAnoModelo"
-    
-    headers = {
-        "Content-Type": "application/json",
-        "Referer": "https://veiculos.fipe.org.br/",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    session = get_session()
     
     payload = {
         "codigoTipoVeiculo": 1,
@@ -157,7 +170,7 @@ def buscar_anos_modelo(codigo_marca, codigo_modelo):
     }
     
     try:
-        response = requests.post(url, json=payload, headers=headers, verify=False)
+        response = session.post(url, json=payload, verify=False)
         response.raise_for_status()
         
         anos = response.json()
@@ -194,12 +207,7 @@ def buscar_modelos_por_ano(codigo_marca, ano_modelo="32000", codigo_combustivel=
     print(f"🌐 Buscando modelos {ano_modelo} ({combustivel_nome.get(codigo_combustivel, 'Outro')}) de {marca_info}...")
     
     url = "https://veiculos.fipe.org.br/api/veiculos/ConsultarModelosAtravesDoAno"
-    
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Referer": "https://veiculos.fipe.org.br/",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    session = get_session()
     
     # Constrói o código ano no formato correto: "32000-1", "32000-2", etc
     codigo_ano = f"{ano_modelo}-{codigo_combustivel}"
@@ -217,7 +225,7 @@ def buscar_modelos_por_ano(codigo_marca, ano_modelo="32000", codigo_combustivel=
     }
     
     try:
-        response = requests.post(url, data=payload, headers=headers, verify=False)
+        response = session.post(url, json=payload, verify=False)
         response.raise_for_status()
         
         modelos = response.json()
@@ -267,12 +275,7 @@ def buscar_valor_veiculo(codigo_marca, codigo_modelo, ano_modelo, codigo_combust
     """
     print(f"🌐 Buscando valor do veículo da API da FIPE...")
     url = "https://veiculos.fipe.org.br/api/veiculos/ConsultarValorComTodosParametros"
-    
-    headers = {
-        "Content-Type": "application/json",
-        "Referer": "https://veiculos.fipe.org.br/",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    session = get_session()
     
     # Usa codigo_ref fornecido ou busca o atual
     if codigo_ref is None:
@@ -290,7 +293,7 @@ def buscar_valor_veiculo(codigo_marca, codigo_modelo, ano_modelo, codigo_combust
     }
     
     try:
-        response = requests.post(url, json=payload, headers=headers, verify=False)
+        response = session.post(url, json=payload, verify=False)
         response.raise_for_status()
         
         dados = response.json()
