@@ -227,6 +227,11 @@ Armazena o histórico de valores consultados na tabela FIPE para cada veículo.
 
 - `FOREIGN KEY (codigo_modelo, codigo_marca) REFERENCES modelos(codigo, codigo_marca) ON DELETE CASCADE`
 
+**Constraints**:
+
+- `UNIQUE (codigo_marca, codigo_modelo, ano_modelo, codigo_combustivel, mes_referencia)` - previne valores duplicados do mesmo veículo no mesmo mês
+- `FOREIGN KEY (codigo_modelo, codigo_marca) REFERENCES modelos(codigo, codigo_marca) ON DELETE CASCADE`
+
 **Índices**:
 
 - `idx_valores_fipe_veiculo` em `(codigo_marca, codigo_modelo, ano_modelo, codigo_combustivel)` - busca por veículo

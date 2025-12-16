@@ -376,6 +376,28 @@ marcas = buscar_marcas_carros()  # Busca com cache
 - **Causa**: Muitas requisições seguidas
 - **Solução**: Aumentar delays (`time.sleep()`) entre requisições
 
+## Gestão de Schema de Banco de Dados
+
+**IMPORTANTE**: Sempre que houver qualquer alteração no schema do banco de dados (tabelas, colunas, índices, triggers, constraints, etc.), você DEVE atualizar ambos os arquivos:
+
+1. **scripts_banco/database_schema.sql**: Script SQL completo com a estrutura atualizada do banco
+2. **docs/database_schema.md**: Documentação em Markdown refletindo as mudanças
+
+### Processo de Alteração de Banco
+
+1. Fazer a alteração no script SQL principal (`database_schema.sql`)
+2. Criar script de migração em `scripts_banco/migrations/` (se aplicável)
+3. Atualizar documentação Markdown (`docs/database_schema.md`)
+4. Testar alterações no Supabase antes de commitar
+5. Documentar razão da alteração nos comentários do commit
+
+### Sincronização SQL ↔ MD
+
+- **database_schema.sql**: Fonte de verdade técnica (executável)
+- **database_schema.md**: Documentação legível para desenvolvedores
+- Ambos devem estar sempre sincronizados
+- Qualquer divergência entre eles é considerada um bug
+
 ## Boas Práticas
 
 1. **Sempre ativar ambiente virtual** antes de executar scripts
@@ -388,6 +410,7 @@ marcas = buscar_marcas_carros()  # Busca com cache
 8. **Documentar funções** com docstrings
 9. **Testar em pequena escala** antes de popular banco completo
 10. **Fazer backup** do banco antes de operações destrutivas
+11. **Atualizar SQL e MD** sempre que houver alteração de schema no banco
 
 ## Referências
 

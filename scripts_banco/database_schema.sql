@@ -96,6 +96,11 @@ CREATE TABLE IF NOT EXISTS valores_fipe (
     FOREIGN KEY (codigo_modelo, codigo_marca) REFERENCES modelos(codigo, codigo_marca) ON DELETE CASCADE
 );
 
+-- Constraint UNIQUE para evitar valores duplicados do mesmo veículo no mesmo mês
+ALTER TABLE valores_fipe 
+ADD CONSTRAINT IF NOT EXISTS valores_fipe_unique 
+UNIQUE (codigo_marca, codigo_modelo, ano_modelo, codigo_combustivel, mes_referencia);
+
 -- Índices para valores_fipe
 CREATE INDEX IF NOT EXISTS idx_valores_fipe_veiculo ON valores_fipe(codigo_marca, codigo_modelo, ano_modelo, codigo_combustivel);
 CREATE INDEX IF NOT EXISTS idx_valores_fipe_codigo_fipe ON valores_fipe(codigo_fipe);
