@@ -212,14 +212,21 @@ def atualizar_valores():
                                     valor_data['valor_numerico'] = float(valor_limpo)
                                 except:
                                     valor_data['valor_numerico'] = 0.0
-                                cache.save_valor_fipe(valor_data)
+                                cache.save_valor_fipe(valor_data, commit=False)
                                 stats['valores_atualizados'] += 1
-                        except:
-                            print(f"    ❌ Erro após retry: {e}")
+                                
+                                # Commit a cada 10 registros
+                                if stats['valores_atualizados'] % 10 == 0:
+                                    cache.conn.commit()
+                        except Exception as retry_error:
+                            print(f"    ❌ Erro após retry: {retry_error}")
                             stats['erros'] += 1
                     else:
                         print(f"    ❌ Erro ao buscar valor: {e}")
                         stats['erros'] += 1
+                    
+                    # Incrementa processados mesmo em caso de erro
+                    stats['processados'] += 1
                     continue
         
         # Resumo final
