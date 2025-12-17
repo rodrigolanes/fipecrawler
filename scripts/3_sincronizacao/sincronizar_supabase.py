@@ -2,11 +2,17 @@
 Script para carregar dados do SQLite local para o Supabase.
 Útil após popular o banco localmente com popular_banco_otimizado.py
 """
+import sys
+from pathlib import Path
+
+# Adiciona o diretório raiz ao path
+ROOT_DIR = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(ROOT_DIR))
+
 import sqlite3
 import time
 from datetime import datetime
-import httpx_ssl_patch  # SEMPRE importar primeiro
-from supabase_client import get_supabase_client
+from src.database.supabase_client import get_supabase_client
 
 
 class SupabaseUploader:
@@ -71,7 +77,7 @@ class SupabaseUploader:
         print("-" * 60)
         
         cursor = self.conn.cursor()
-        cursor.execute('SELECT codigo, nome FROM marcas')
+        cursor.execute('SELECT codigo, tipo_veiculo, nome FROM marcas')
         rows = cursor.fetchall()
         
         if not rows:
@@ -80,19 +86,19 @@ class SupabaseUploader:
         
         print(f"   📊 {len(rows)} registros no SQLite")
         
-        # Converte para formato esperado (adiciona tipo_veiculo=1 para carros)
+        # Converte para formato esperado
         data = [
             {
                 'codigo': row['codigo'], 
-                'nome': row['nome'],
-                'tipo_veiculo': 1  # 1=carros (único tipo que estamos coletando)
+                'tipo_veiculo': row['tipo_veiculo'],
+                'nome': row['nome']
             } 
             for row in rows
         ]
         
         try:
-            # Upsert em lote (on_conflict especifica a coluna única)
-            self.supabase.table('marcas').upsert(data, on_conflict='codigo').execute()
+            # Upsert em lote (on_conflict especifica a PK composta)
+            self.supabase.table('marcas').upsert(data, on_conflict='codigo,tipo_veiculo').execute()
             print(f"   ✅ {len(data)} registros enviados")
             return len(data)
         except Exception as e:
@@ -116,11 +122,12 @@ class SupabaseUploader:
         
         # Upload em lotes
         enviados = 0
+        erros = 0
         offset = 0
         
         while offset < total:
             cursor.execute(f'''
-                SELECT codigo, codigo_marca, nome 
+                SELECT codigo, codigo_marca, tipo_veiculo, nome 
                 FROM modelos 
                 LIMIT {self.batch_size} OFFSET {offset}
             ''')
@@ -133,23 +140,28 @@ class SupabaseUploader:
                 {
                     'codigo': row['codigo'],
                     'codigo_marca': row['codigo_marca'],
+                    'tipo_veiculo': row['tipo_veiculo'],
                     'nome': row['nome']
                 }
                 for row in rows
             ]
             
             try:
-                # Upsert especificando as colunas da constraint única
-                self.supabase.table('modelos').upsert(data, on_conflict='codigo,codigo_marca').execute()
+                # Upsert especificando as colunas da PK composta
+                self.supabase.table('modelos').upsert(data, on_conflict='codigo,codigo_marca,tipo_veiculo').execute()
                 enviados += len(data)
                 print(f"   📤 {enviados}/{total} registros enviados ({enviados*100//total}%)")
             except Exception as e:
+                erros += len(data)
                 print(f"   ❌ Erro no lote {offset}-{offset+len(data)}: {e}")
+                # Continua mesmo com erro
             
             offset += self.batch_size
             time.sleep(0.5)  # Pequeno delay entre lotes
         
         print(f"   ✅ {enviados} registros enviados")
+        if erros > 0:
+            print(f"   ⚠️ {erros} registros com erro")
         return enviados
     
     def upload_anos_combustivel(self):
@@ -221,15 +233,26 @@ class SupabaseUploader:
             return 0
         
         print(f"   📊 {total} registros no SQLite")
+        print("   🔍 Filtrando apenas relacionamentos com modelos existentes no Supabase...")
         
         # Upload em lotes
         enviados = 0
+        pulados = 0
         offset = 0
         
         while offset < total:
+            # Query com JOIN para garantir que o modelo existe
             cursor.execute(f'''
-                SELECT codigo_marca, codigo_modelo, codigo_ano_combustivel
-                FROM modelos_anos
+                SELECT DISTINCT
+                    ma.codigo_marca, 
+                    ma.codigo_modelo, 
+                    ma.tipo_veiculo, 
+                    ma.codigo_ano_combustivel
+                FROM modelos_anos ma
+                INNER JOIN modelos m 
+                    ON ma.codigo_modelo = m.codigo 
+                    AND ma.codigo_marca = m.codigo_marca 
+                    AND ma.tipo_veiculo = m.tipo_veiculo
                 LIMIT {self.batch_size} OFFSET {offset}
             ''')
             rows = cursor.fetchall()
@@ -241,23 +264,35 @@ class SupabaseUploader:
                 {
                     'codigo_marca': row['codigo_marca'],
                     'codigo_modelo': row['codigo_modelo'],
+                    'tipo_veiculo': row['tipo_veiculo'],
                     'codigo_ano_combustivel': row['codigo_ano_combustivel']
                 }
                 for row in rows
             ]
             
             try:
-                # Upsert especificando as colunas da constraint única
-                self.supabase.table('modelos_anos').upsert(data, on_conflict='codigo_marca,codigo_modelo,codigo_ano_combustivel').execute()
+                # Upsert especificando as colunas da PK composta
+                result = self.supabase.table('modelos_anos').upsert(
+                    data, 
+                    on_conflict='codigo_marca,codigo_modelo,tipo_veiculo,codigo_ano_combustivel'
+                ).execute()
                 enviados += len(data)
-                print(f"   📤 {enviados}/{total} registros enviados ({enviados*100//total}%)")
+                print(f"   📤 {enviados}/{total} registros processados ({enviados*100//total}%)")
             except Exception as e:
-                print(f"   ❌ Erro no lote {offset}-{offset+len(data)}: {e}")
+                error_msg = str(e)
+                # Se ainda houver erro de FK, conta como pulado
+                if '23503' in error_msg or 'foreign key' in error_msg.lower():
+                    pulados += len(data)
+                    print(f"   ⚠️ Lote {offset}-{offset+len(data)}: {len(data)} registros pulados (modelos não existem no Supabase)")
+                else:
+                    print(f"   ❌ Erro no lote {offset}-{offset+len(data)}: {e}")
             
             offset += self.batch_size
             time.sleep(0.5)  # Pequeno delay entre lotes
         
         print(f"   ✅ {enviados} registros enviados")
+        if pulados > 0:
+            print(f"   ⚠️ {pulados} registros pulados (foreign key)")
         return enviados
     
     def upload_valores_fipe(self):
@@ -281,8 +316,8 @@ class SupabaseUploader:
         
         while offset < total:
             cursor.execute(f'''
-                SELECT codigo_marca, codigo_modelo, ano_modelo, codigo_combustivel,
-                       codigo_ano_combustivel, valor, valor_numerico, codigo_fipe, 
+                SELECT codigo_marca, codigo_modelo, tipo_veiculo, ano_modelo, 
+                       codigo_combustivel, valor, valor_numerico, codigo_fipe, 
                        mes_referencia, codigo_referencia, marca, modelo, 
                        combustivel, data_consulta
                 FROM valores_fipe
@@ -297,9 +332,9 @@ class SupabaseUploader:
                 {
                     'codigo_marca': row['codigo_marca'],
                     'codigo_modelo': row['codigo_modelo'],
+                    'tipo_veiculo': row['tipo_veiculo'],
                     'ano_modelo': row['ano_modelo'],
                     'codigo_combustivel': row['codigo_combustivel'],
-                    'codigo_ano_combustivel': row['codigo_ano_combustivel'],
                     'valor': row['valor'],
                     'valor_numerico': row['valor_numerico'],
                     'codigo_fipe': row['codigo_fipe'],
@@ -314,8 +349,8 @@ class SupabaseUploader:
             ]
             
             try:
-                # Upsert com constraint única criada
-                self.supabase.table('valores_fipe').upsert(data, on_conflict='codigo_marca,codigo_modelo,ano_modelo,codigo_combustivel,mes_referencia').execute()
+                # Upsert com PK composta
+                self.supabase.table('valores_fipe').upsert(data, on_conflict='codigo_marca,codigo_modelo,tipo_veiculo,ano_modelo,codigo_combustivel,mes_referencia').execute()
                 enviados += len(data)
                 print(f"   📤 {enviados}/{total} registros enviados ({enviados*100//total}%)")
             except Exception as e:

@@ -3,10 +3,17 @@ Script para atualização incremental de modelos.
 Busca novos modelos Zero Km por marca para descobrir lançamentos.
 Muito mais rápido que popular_banco.py pois só busca novidades.
 """
+import sys
+from pathlib import Path
+
+# Adiciona o diretório raiz ao path
+ROOT_DIR = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(ROOT_DIR))
+
 import time
 import random
-from fipe_crawler import buscar_marcas_carros, buscar_modelos_por_ano, buscar_anos_modelo
-from fipe_local_cache import FipeLocalCache
+from src.crawler.fipe_crawler import buscar_marcas_carros, buscar_modelos_por_ano, buscar_anos_modelo
+from src.cache.fipe_local_cache import FipeLocalCache
 
 
 def atualizar_modelos():
@@ -98,11 +105,11 @@ def atualizar_modelos():
                         
                         try:
                             inicio_anos = time.time()
-                            anos = buscar_anos_modelo(codigo_marca, codigo_modelo)
+                            anos = buscar_anos_modelo(codigo_marca, codigo_modelo, tipo_veiculo=1)
                             stats['tempo_api'] += time.time() - inicio_anos
                             
                             if anos:
-                                cache.save_anos_modelo(anos, codigo_marca, codigo_modelo)
+                                cache.save_anos_modelo(anos, codigo_marca, codigo_modelo, tipo_veiculo=1)
                                 stats['novos_anos'] += len(anos)
                             
                             # Delay entre modelos

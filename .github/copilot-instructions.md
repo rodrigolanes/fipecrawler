@@ -1,26 +1,48 @@
 # Instruções do Projeto - FIPE Crawler
 
+## 🌍 Idioma do Projeto
+
+**IMPORTANTE**: Este projeto é 100% em **Português Brasileiro (pt-BR)**.
+
+- ✅ **Código**: Variáveis, funções, classes, comentários em PT-BR
+- ✅ **Documentação**: README, docstrings, markdown em PT-BR
+- ✅ **Commits**: Mensagens de commit em PT-BR
+- ✅ **Conversas**: Todas as interações com GitHub Copilot devem ser em PT-BR
+- ✅ **Logs**: Mensagens de output e debug em PT-BR
+
+**Motivo**: Projeto brasileiro, API brasileira (FIPE), equipe brasileira.
+
 ## Visão Geral
 
-Crawler Python para buscar dados de veículos da tabela FIPE (Fundação Instituto de Pesquisas Econômicas) com cache em banco de dados Supabase PostgreSQL para evitar requisições duplicadas e bloqueio por rate limiting.
+Crawler Python para buscar dados de veículos da tabela FIPE (Fundação Instituto de Pesquisas Econômicas) com sistema de cache duplo (SQLite local + Supabase PostgreSQL) para máxima performance e evitar requisições duplicadas/bloqueio por rate limiting.
 
 ## Arquitetura
 
 ### Componentes Principais
 
-1. **fipe_crawler.py**: Funções para interagir com a API FIPE
-2. **fipe_cache.py**: Classe `FipeCache` para gerenciar cache no Supabase
-3. **supabase_client.py**: Cliente singleton do Supabase com configuração SSL
-4. **httpx_ssl_patch.py**: Patch para desabilitar verificação SSL em ambiente corporativo
-5. **popular_banco.py**: Script para popular o banco com todos os dados da FIPE (uso inicial)
-6. **atualizar_modelos.py**: Script para atualização incremental de modelos (busca Zero Km)
-7. **atualizar_valores.py**: Script para atualização mensal de valores FIPE
+1. **fipe_crawler.py**: Funções para interagir com a API FIPE (requisições HTTP)
+2. **fipe_local_cache.py**: Classe `FipeLocalCache` para cache SQLite local (rápido, thread-safe)
+3. **fipe_cache.py**: Classe `FipeCache` para gerenciar cache no Supabase (remoto, opcional)
+4. **supabase_client.py**: Cliente singleton do Supabase com configuração SSL
+5. **httpx_ssl_patch.py**: Patch para desabilitar verificação SSL em ambiente corporativo
+6. **popular_banco_otimizado.py**: Script paralelo para popular banco SQLite (uso inicial, 10x mais rápido)
+7. **atualizar_modelos.py**: Script para atualização incremental de modelos (busca Zero Km)
+8. **atualizar_valores.py**: Script para atualização mensal de valores FIPE
+9. **upload_para_supabase.py**: Script para sincronizar SQLite → Supabase em lote
 
-### Fluxo de Dados
+### Fluxo de Dados (Arquitetura Otimizada)
 
 ```
-API FIPE → Crawler → Cache (Supabase) → Aplicação
+API FIPE → fipe_crawler → fipe_local_cache (SQLite) → upload_para_supabase → Supabase PostgreSQL
+                                ↓
+                          fipe_local.db (persistente)
 ```
+
+**Vantagens da arquitetura atual**:
+- ⚡ Gravação 100x mais rápida (SQLite vs rede)
+- 🔒 Thread-safe com locks para paralelização
+- 💾 Funciona offline (não depende do Supabase)
+- 🔄 Upload opcional em lote após coleta
 
 ## Tecnologias e Versões
 
@@ -39,7 +61,8 @@ API FIPE → Crawler → Cache (Supabase) → Aplicação
 
 ### Banco de Dados
 
-- **Supabase PostgreSQL** (cloud)
+- **SQLite Local** (`fipe_local.db`): Cache principal, gravação rápida, thread-safe
+- **Supabase PostgreSQL** (cloud): Backup remoto opcional, acesso via API
 - **RLS**: Row Level Security habilitado com políticas para role `anon`
 
 ## Configuração de Ambiente
@@ -297,10 +320,28 @@ pip install -r requirements.txt
 ### 3. Popular Banco (Primeira Vez)
 
 ```bash
-python popular_banco.py
+python popular_banco_otimizado.py
 ```
 
-**Importante**: Execute apenas na primeira vez ou para repopular do zero. Pode levar horas.
+**Importante**: Execute apenas na primeira vez ou para repopular do zero. Pode levar 2-4 horas com 5 workers.
+**Características**:
+- Processamento paralelo (5 marcas simultâneas por padrão)
+- Gravação em SQLite local (100x mais rápido que Supabase)
+- Estratégia inteligente: escolhe buscar por modelo ou por ano conforme mais eficiente
+- Thread-safe com locks
+- Progresso persistente (pode ser interrompido e retomado)
+
+### 3.1. Upload para Supabase (Opcional)
+
+```bash
+python upload_para_supabase.py
+```
+
+**Quando usar**: Após popular/atualizar o banco local
+**Características**:
+- Upload em lotes de 1000 registros
+- Idempotente (pode ser executado múltiplas vezes)
+- Mostra estatísticas comparativas SQLite vs Supabase
 
 ### 4. Atualização Mensal de Modelos
 
@@ -323,11 +364,19 @@ python atualizar_valores.py
 ### 6. Usar Crawler
 
 ```python
+# Exemplo 1: Usando cache local (SQLite)
 from fipe_crawler import buscar_marcas_carros, buscar_modelos
+from fipe_local_cache import FipeLocalCache
+
+cache = FipeLocalCache()
+marcas = cache.get_all_marcas()  # Busca do SQLite local
+
+# Exemplo 2: Usando cache remoto (Supabase)
+import httpx_ssl_patch  # SEMPRE primeiro
 from fipe_cache import FipeCache
 
 cache = FipeCache()
-marcas = buscar_marcas_carros()  # Busca com cache
+marcas = cache.get_marcas()  # Busca do Supabase
 ```
 
 ## Estratégia de Atualização
@@ -349,9 +398,10 @@ marcas = buscar_marcas_carros()  # Busca com cache
 ### População Inicial
 
 - **Quando**: Apenas uma vez (ou para repopular do zero)
-- **Script**: `popular_banco.py`
+- **Script**: `popular_banco_otimizado.py`
 - **Como funciona**: Busca TODAS as marcas, modelos e anos disponíveis
-- **Tempo**: Várias horas (muitas requisições)
+- **Tempo**: 2-4 horas com 5 workers paralelos
+- **Vantagens**: Gravação local (SQLite), paralelização, estratégia inteligente
 
 ## Troubleshooting
 

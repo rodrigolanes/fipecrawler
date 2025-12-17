@@ -3,11 +3,18 @@ Script para atualização completa de valores FIPE.
 Busca os valores atualizados de TODOS os veículos já cadastrados no banco.
 Deve ser executado mensalmente quando a tabela FIPE é atualizada.
 """
+import sys
+from pathlib import Path
+
+# Adiciona o diretório raiz ao path
+ROOT_DIR = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(ROOT_DIR))
+
 import time
 import random
 from datetime import datetime
-from fipe_crawler import buscar_valor_veiculo, obter_codigo_referencia_atual, buscar_tabela_referencia
-from fipe_local_cache import FipeLocalCache
+from src.crawler.fipe_crawler import buscar_valor_veiculo, obter_codigo_referencia_atual, buscar_tabela_referencia
+from src.cache.fipe_local_cache import FipeLocalCache
 
 
 def atualizar_valores():
@@ -67,26 +74,31 @@ def atualizar_valores():
         mes_referencia_real = mes_salvo[0] if mes_salvo else mes_referencia
         
         # Conta quantos já têm valores cadastrados (usando o formato real do banco)
+        # Nota: valores_fipe usa ano_modelo + codigo_combustivel, não codigo_ano_combustivel
         cursor.execute('''
             SELECT COUNT(*)
             FROM modelos_anos ma
             INNER JOIN valores_fipe vf 
                 ON vf.codigo_marca = ma.codigo_marca
                 AND vf.codigo_modelo = ma.codigo_modelo
-                AND vf.codigo_ano_combustivel = ma.codigo_ano_combustivel
+                AND vf.tipo_veiculo = ma.tipo_veiculo
                 AND vf.mes_referencia = ?
+            WHERE ma.codigo_ano_combustivel = 
+                CAST(vf.ano_modelo AS TEXT) || '-' || CAST(vf.codigo_combustivel AS TEXT)
         ''', (mes_referencia_real,))
         ja_cadastrados = cursor.fetchone()[0]
         
-        # Busca apenas veículos SEM valores cadastrados no mês atual (usando formato real)
+        # Busca apenas veículos SEM valores cadastrados no mês atual
         cursor.execute('''
-            SELECT ma.codigo_marca, ma.codigo_modelo, ma.codigo_ano_combustivel
+            SELECT ma.codigo_marca, ma.codigo_modelo, ma.tipo_veiculo, ma.codigo_ano_combustivel
             FROM modelos_anos ma
             LEFT JOIN valores_fipe vf 
                 ON vf.codigo_marca = ma.codigo_marca
                 AND vf.codigo_modelo = ma.codigo_modelo
-                AND vf.codigo_ano_combustivel = ma.codigo_ano_combustivel
+                AND vf.tipo_veiculo = ma.tipo_veiculo
                 AND vf.mes_referencia = ?
+                AND ma.codigo_ano_combustivel = 
+                    CAST(vf.ano_modelo AS TEXT) || '-' || CAST(vf.codigo_combustivel AS TEXT)
             WHERE vf.codigo_marca IS NULL
         ''', (mes_referencia_real,))
         veiculos = cursor.fetchall()
@@ -112,7 +124,9 @@ def atualizar_valores():
         for i, veiculo in enumerate(veiculos, 1):
                 codigo_marca = veiculo[0]
                 codigo_modelo = veiculo[1]
-                codigo_ano_combustivel = veiculo[2]
+                tipo_veiculo = veiculo[2]
+                codigo_ano_combustivel = veiculo[3]
+                
                 # Extrai ano e combustível do código (formato: "2024-1" ou "32000-6")
                 if '-' in codigo_ano_combustivel:
                     ano_modelo, codigo_combustivel = codigo_ano_combustivel.split('-')
@@ -137,17 +151,22 @@ def atualizar_valores():
                         codigo_modelo, 
                         ano_modelo, 
                         codigo_combustivel,
+                        tipo_veiculo,  # IMPORTANTE: passa tipo_veiculo
                         codigo_ref  # Passa codigo_ref já obtido no início
                     )
                     
-                    if valor:
+                    if valor and valor.get('Valor'):
+                        # Valida que o valor principal está presente
+                        valor_texto = valor.get('Valor')
+                        
                         # Prepara dados para salvar
                         valor_data = {
                             'codigo_marca': int(codigo_marca),
                             'codigo_modelo': int(codigo_modelo),
+                            'tipo_veiculo': int(tipo_veiculo),
                             'ano_modelo': int(ano_modelo),
                             'codigo_combustivel': int(codigo_combustivel),
-                            'valor': valor.get('Valor'),
+                            'valor': valor_texto,
                             'marca': valor.get('Marca'),
                             'modelo': valor.get('Modelo'),
                             'combustivel': valor.get('Combustivel'),
@@ -158,7 +177,6 @@ def atualizar_valores():
                         }
                         
                         # Extrai valor numérico
-                        valor_texto = valor.get('Valor', 'R$ 0,00')
                         valor_limpo = valor_texto.replace('R$', '').replace('.', '').replace(',', '.').strip()
                         try:
                             valor_data['valor_numerico'] = float(valor_limpo)
@@ -172,6 +190,9 @@ def atualizar_valores():
                         # Commit a cada 10 registros para salvar progresso
                         if stats['valores_atualizados'] % 10 == 0:
                             cache.conn.commit()
+                    else:
+                        # API retornou mas sem valor (veículo descontinuado ou sem preço)
+                        stats['erros'] += 1
                     
                     # Delay entre requisições (0.8-1.2s - reduzido após otimização)
                     time.sleep(random.uniform(0.8, 1.2))

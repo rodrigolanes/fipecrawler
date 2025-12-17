@@ -1,15 +1,5 @@
 from datetime import datetime
 from typing import List, Dict, Optional
-import ssl
-import urllib3
-import os
-
-# Aplica patch no httpx ANTES de importar supabase
-import httpx_ssl_patch
-
-# Desabilita avisos SSL
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 from supabase_client import get_supabase_client
 
 

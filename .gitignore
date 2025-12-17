@@ -28,5 +28,11 @@ Thumbs.db
 
 # Project specific
 *.db
+*.db.backup*
 *.sqlite
 *.sqlite3
+
+# Scripts de teste temporários
+tests/
+!tests/__init__.py
+!tests/README.md

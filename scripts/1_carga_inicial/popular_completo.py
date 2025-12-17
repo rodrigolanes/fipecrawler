@@ -2,6 +2,11 @@
 Script otimizado para popular o banco de dados com paralelização e cache SQLite local.
 Até 10x mais rápido que popular_banco.py tradicional.
 
+Tipos de Veículo FIPE:
+- 1 = Carros
+- 2 = Motos
+- 3 = Caminhões
+
 Códigos de Combustível FIPE:
 - 1 = Gasolina
 - 2 = Álcool/Etanol
@@ -11,13 +16,18 @@ Códigos de Combustível FIPE:
 - 6 = Híbrido
 - 7 = Gás Natural (GNV)
 """
+import sys
+from pathlib import Path
+
+# Adiciona o diretório raiz ao path
+ROOT_DIR = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(ROOT_DIR))
+
 import time
-import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Semaphore, Lock, current_thread
-import httpx_ssl_patch  # SEMPRE primeiro
-from fipe_crawler import buscar_marcas_carros, buscar_modelos, buscar_anos_modelo, buscar_tabela_referencia
-from fipe_local_cache import FipeLocalCache
+from src.crawler.fipe_crawler import buscar_marcas_carros, buscar_modelos, buscar_anos_modelo, buscar_tabela_referencia, buscar_modelos_por_ano
+from src.cache.fipe_local_cache import FipeLocalCache
 
 
 class PopularBancoOtimizado:
@@ -25,13 +35,22 @@ class PopularBancoOtimizado:
     Classe para popular o banco de forma otimizada:
     1. Gravação local em SQLite (rápido)
     2. Processamento paralelo (5 marcas simultâneas)
+    3. Suporte a carros, motos e caminhões
     """
     
-    def __init__(self, max_workers=5):
+    # Mapeamento de tipos de veículos
+    TIPOS_VEICULO = {
+        1: {'nome': 'Carros', 'emoji': '🚗'},
+        2: {'nome': 'Motos', 'emoji': '🏍️'},
+        3: {'nome': 'Caminhões', 'emoji': '🚚'}
+    }
+    
+    def __init__(self, max_workers=5, tipos_veiculo=None):
         self.max_workers = max_workers
         self.semaphore = Semaphore(max_workers)  # Controla concorrência
         self.lock = Lock()  # Thread-safe para stats
-        
+                # Tipos de veículo a processar (padrão: todos)
+        self.tipos_veiculo = tipos_veiculo if tipos_veiculo else [1, 2, 3]
         # Cache local
         self.cache_local = FipeLocalCache()
         
@@ -47,33 +66,40 @@ class PopularBancoOtimizado:
             'tempo_delays': 0.0
         }
     
-    def processar_marca(self, marca, i, total):
+    def processar_marca(self, marca, i, total, tipo_veiculo):
         """
         Processa uma marca em paralelo usando estratégia híbrida inteligente.
         - Se poucos modelos (<50): busca anos por modelo (menos requisições)
         - Se muitos modelos (>=50): busca modelos por ano (evita centenas de requisições)
+        
+        Args:
+            marca: Dicionário com dados da marca
+            i: Índice atual
+            total: Total de marcas
+            tipo_veiculo: Tipo de veículo (1=Carros, 2=Motos, 3=Caminhões)
         """
         with self.semaphore:  # Limita concorrência a max_workers
             codigo_marca = marca['Value']
             nome_marca = marca['Label']
+            tipo_info = self.TIPOS_VEICULO.get(tipo_veiculo, {'nome': 'Desconhecido', 'emoji': '❓'})
             
             # Identifica worker (thread)
             worker_id = current_thread().name.replace('ThreadPoolExecutor-', 'W')
             
-            print(f"[{worker_id}] [{i}/{total}] 🔄 Processando: {nome_marca} ({codigo_marca})")
+            print(f"[{worker_id}] [{i}/{total}] {tipo_info['emoji']} Processando: {nome_marca} ({codigo_marca}) - {tipo_info['nome']}")
             
             try:
                 # 1. Busca modelos da marca (para decidir estratégia)
                 inicio_api = time.time()
-                resultado = buscar_modelos(codigo_marca)
+                resultado = self._buscar_modelos_com_retry(codigo_marca, nome_marca, worker_id, tipo_veiculo)
                 tempo_api = time.time() - inicio_api
                 
                 with self.lock:
                     self.stats['tempo_api'] += tempo_api
                 
-                # Delay após buscar modelos (1.5-2.0s)
+                # Delay após buscar modelos (2.0s fixo)
                 inicio_delay = time.time()
-                time.sleep(random.uniform(1.5, 2.0))
+                time.sleep(2.0)
                 tempo_delay = time.time() - inicio_delay
                 
                 with self.lock:
@@ -113,15 +139,15 @@ class PopularBancoOtimizado:
                 if total_modelos <= total_combinacoes_anos:
                     # Menos modelos que combinações de anos: busca POR MODELO
                     print(f"[{worker_id}]     📊 {total_modelos} modelos vs {total_combinacoes_anos} combinações → Estratégia: ANOS POR MODELO")
-                    self._processar_por_modelo(codigo_marca, nome_marca, modelos_api, modelos_cache, modelos_sem_anos, worker_id)
+                    self._processar_por_modelo(codigo_marca, nome_marca, modelos_api, modelos_cache, modelos_sem_anos, worker_id, tipo_veiculo)
                 else:
                     # Menos combinações de anos que modelos: busca POR ANO
                     print(f"[{worker_id}]     📊 {total_modelos} modelos vs {total_combinacoes_anos} combinações → Estratégia: MODELOS POR ANO")
-                    self._processar_por_ano(codigo_marca, nome_marca, anos_api, worker_id)
+                    self._processar_por_ano(codigo_marca, nome_marca, anos_api, worker_id, tipo_veiculo)
                 
-                # Delay entre marcas (1-2s)
+                # Delay entre marcas (2.0s fixo)
                 inicio_delay = time.time()
-                time.sleep(random.uniform(1.0, 2.0))
+                time.sleep(2.0)
                 tempo_delay = time.time() - inicio_delay
                 
                 with self.lock:
@@ -133,7 +159,7 @@ class PopularBancoOtimizado:
                     self.stats['erros'] += 1
                 print()
     
-    def _processar_por_modelo(self, codigo_marca, nome_marca, modelos_api, modelos_cache, modelos_sem_anos, worker_id):
+    def _processar_por_modelo(self, codigo_marca, nome_marca, modelos_api, modelos_cache, modelos_sem_anos, worker_id, tipo_veiculo):
         """
         Estratégia 1: Busca anos para cada modelo.
         Mais eficiente quando há poucos modelos (<50).
@@ -150,7 +176,7 @@ class PopularBancoOtimizado:
         
         # Salva modelos
         inicio_db = time.time()
-        self.cache_local.save_modelos(modelos_processar, codigo_marca)
+        self.cache_local.save_modelos(modelos_processar, codigo_marca, tipo_veiculo)
         tempo_db = time.time() - inicio_db
         
         with self.lock:
@@ -176,7 +202,7 @@ class PopularBancoOtimizado:
             try:
                 # Busca anos da API com retry
                 inicio_anos = time.time()
-                anos = self._buscar_anos_com_retry(codigo_marca, codigo_modelo, worker_id, nome_modelo)
+                anos = self._buscar_anos_com_retry(codigo_marca, codigo_modelo, worker_id, nome_modelo, tipo_veiculo)
                 tempo_anos = time.time() - inicio_anos
                 
                 with self.lock:
@@ -185,7 +211,7 @@ class PopularBancoOtimizado:
                 if anos:
                     # Salva localmente
                     inicio_db = time.time()
-                    self.cache_local.save_anos_modelo(anos, codigo_marca, codigo_modelo)
+                    self.cache_local.save_anos_modelo(anos, codigo_marca, codigo_modelo, tipo_veiculo)
                     tempo_db = time.time() - inicio_db
                     
                     with self.lock:
@@ -194,9 +220,9 @@ class PopularBancoOtimizado:
                     
                     anos_total += len(anos)
                 
-                # Delay entre modelos (1.5-2.0s)
+                # Delay entre modelos (2.0s fixo)
                 inicio_delay = time.time()
-                time.sleep(random.uniform(1.5, 2.0))
+                time.sleep(2.0)
                 tempo_delay = time.time() - inicio_delay
                 
                 with self.lock:
@@ -211,12 +237,12 @@ class PopularBancoOtimizado:
         print(f"[{worker_id}]     ✅ {len(modelos_processar)} modelos, {anos_total} anos salvos")
         print()
     
-    def _processar_por_ano(self, codigo_marca, nome_marca, anos_api, worker_id):
+    def _processar_por_ano(self, codigo_marca, nome_marca, anos_api, worker_id, tipo_veiculo):
         """
         Estratégia 2: Busca modelos para cada ano/combustível.
         Mais eficiente quando há muitos modelos (>=50).
         """
-        from fipe_crawler import buscar_modelos_por_ano
+        from src.crawler.fipe_crawler import buscar_modelos_por_ano
         
         print(f"[{worker_id}]     📅 Buscando modelos por ano/combustível...")
         
@@ -275,11 +301,14 @@ class PopularBancoOtimizado:
                 
                 # Busca modelos desta combinação específica
                 inicio_api = time.time()
-                modelos = buscar_modelos_por_ano(
+                modelos = self._buscar_modelos_por_ano_com_retry(
                     codigo_marca=codigo_marca,
                     ano_modelo=ano_modelo,
                     codigo_combustivel=codigo_combustivel,
-                    nome_marca=nome_marca
+                    nome_marca=nome_marca,
+                    tipo_veiculo=tipo_veiculo,
+                    label_completo=label_completo,
+                    worker_id=worker_id
                 )
                 tempo_api = time.time() - inicio_api
                 total_requisicoes += 1
@@ -310,26 +339,19 @@ class PopularBancoOtimizado:
                         # Adiciona relacionamento usando o código ano+combustível completo
                         relacionamentos.append((codigo_modelo, codigo_ano_completo, label_completo))
                 
-                # Delay entre requisições (1.5-2.0s)
+                # Delay entre requisições (2.0s fixo)
                 inicio_delay = time.time()
-                time.sleep(random.uniform(1.5, 2.0))
+                time.sleep(2.0)
                 tempo_delay = time.time() - inicio_delay
                 
                 with self.lock:
                     self.stats['tempo_delays'] += tempo_delay
             
             except Exception as e:
-                if "429" in str(e):
-                    # Rate limit: pausa maior
-                    wait_time = 10
-                    print(f"[{worker_id}]         ⚠️ Rate limit em {nome_marca} ({codigo_marca}) {label_completo}. Aguardando {wait_time}s...")
-                    time.sleep(wait_time)
-                    with self.lock:
-                        self.stats['tempo_delays'] += wait_time
-                else:
-                    print(f"[{worker_id}]         ⚠️ Erro em {nome_marca} ({codigo_marca}) {label_completo}: {e}")
-                    with self.lock:
-                        self.stats['erros'] += 1
+                # Erros não-429 (já que retry interno trata 429)
+                print(f"[{worker_id}]         ⚠️ Erro inesperado em {nome_marca} ({codigo_marca}) {label_completo}: {e}")
+                with self.lock:
+                    self.stats['erros'] += 1
         
         # Salva modelos no cache
         if modelos_encontrados:
@@ -337,7 +359,7 @@ class PopularBancoOtimizado:
             inicio_db = time.time()
             
             modelos_lista = list(modelos_encontrados.values())
-            self.cache_local.save_modelos(modelos_lista, codigo_marca)
+            self.cache_local.save_modelos(modelos_lista, codigo_marca, tipo_veiculo)
             
             tempo_db = time.time() - inicio_db
             
@@ -356,7 +378,7 @@ class PopularBancoOtimizado:
                     'Value': codigo_ano_completo,
                     'Label': label_completo
                 }]
-                self.cache_local.save_anos_modelo(anos_data, codigo_marca, int(codigo_modelo))
+                self.cache_local.save_anos_modelo(anos_data, codigo_marca, int(codigo_modelo), tipo_veiculo)
             
             tempo_db = time.time() - inicio_db
             
@@ -373,11 +395,59 @@ class PopularBancoOtimizado:
         print(f"[{worker_id}]     📊 {total_requisicoes} requisições (economizou {economia} req, {economia_perc:.1f}%)")
         print()
     
-    def _buscar_anos_com_retry(self, codigo_marca, codigo_modelo, worker_id, nome_modelo="", max_retries=3):
+    def _buscar_modelos_com_retry(self, codigo_marca, nome_marca, worker_id, tipo_veiculo=1, max_retries=3):
+        """Busca modelos com retry em caso de rate limiting"""
+        for retry in range(max_retries):
+            try:
+                return buscar_modelos(codigo_marca, tipo_veiculo, nome_marca)
+            except Exception as e:
+                if "429" in str(e) or "too many" in str(e).lower():
+                    if retry < max_retries - 1:
+                        wait_time = 5 * (2 ** retry)
+                        print(f"[{worker_id}]     ⚠️  Rate limit ao buscar modelos de {nome_marca} ({codigo_marca}). Aguardando {wait_time}s... (tentativa {retry+1}/{max_retries})")
+                        time.sleep(wait_time)
+                        with self.lock:
+                            self.stats['tempo_delays'] += wait_time
+                    else:
+                        # Após 3 tentativas, desiste e retorna None
+                        print(f"[{worker_id}]     ❌ Rate limit persistente em {nome_marca} ({codigo_marca}) após {max_retries} tentativas")
+                        return None
+                else:
+                    raise
+        return None
+    
+    def _buscar_modelos_por_ano_com_retry(self, codigo_marca, ano_modelo, codigo_combustivel, nome_marca, tipo_veiculo, label_completo, worker_id, max_retries=3):
+        """Busca modelos por ano com retry em caso de rate limiting"""
+        for retry in range(max_retries):
+            try:
+                return buscar_modelos_por_ano(
+                    codigo_marca=codigo_marca,
+                    ano_modelo=ano_modelo,
+                    codigo_combustivel=codigo_combustivel,
+                    nome_marca=nome_marca,
+                    tipo_veiculo=tipo_veiculo
+                )
+            except Exception as e:
+                if "429" in str(e) or "too many" in str(e).lower():
+                    if retry < max_retries - 1:
+                        wait_time = 5 * (2 ** retry)
+                        print(f"[{worker_id}]         ⚠️  Rate limit em {nome_marca} ({codigo_marca}) {label_completo}. Aguardando {wait_time}s... (tentativa {retry+1}/{max_retries})")
+                        time.sleep(wait_time)
+                        with self.lock:
+                            self.stats['tempo_delays'] += wait_time
+                    else:
+                        # Após 3 tentativas, desiste e retorna lista vazia
+                        print(f"[{worker_id}]         ❌ Rate limit persistente em {nome_marca} ({codigo_marca}) {label_completo} após {max_retries} tentativas")
+                        return []
+                else:
+                    raise
+        return []
+    
+    def _buscar_anos_com_retry(self, codigo_marca, codigo_modelo, worker_id, nome_modelo="", tipo_veiculo=1, max_retries=3):
         """Busca anos com retry em caso de rate limiting"""
         for retry in range(max_retries):
             try:
-                return buscar_anos_modelo(codigo_marca, codigo_modelo)
+                return buscar_anos_modelo(codigo_marca, codigo_modelo, tipo_veiculo, nome_modelo)
             except Exception as e:
                 if "429" in str(e) or "too many" in str(e).lower():
                     if retry < max_retries - 1:
@@ -388,6 +458,8 @@ class PopularBancoOtimizado:
                         with self.lock:
                             self.stats['tempo_delays'] += wait_time
                     else:
+                        # Após 3 tentativas, desiste e propaga exceção
+                        print(f"[{worker_id}]         ❌ Rate limit persistente em {modelo_info} após {max_retries} tentativas")
                         raise
                 else:
                     raise
@@ -428,49 +500,59 @@ class PopularBancoOtimizado:
                 print(f"✅ {self.stats['tabelas_referencia']} tabelas carregadas")
                 print(f"   Mais recente: {tabelas[0]['Mes']} (código {tabelas[0]['Codigo']})\n")
             
-            # 2. Buscar marcas da API e comparar com cache
-            print("📊 ETAPA 2/3: Verificando marcas...")
-            print("-" * 70)
-            inicio_api = time.time()
-            marcas_api = buscar_marcas_carros()
-            self.stats['tempo_api'] += time.time() - inicio_api
-            
-            # Salva novas marcas no cache local
-            inicio_db = time.time()
-            self.cache_local.save_marcas(marcas_api)
-            self.stats['tempo_db_local'] += time.time() - inicio_db
-            
-            self.stats['marcas'] = len(marcas_api)
-            print(f"✅ {len(marcas_api)} marcas encontradas na API")
-            print(f"ℹ️  Todas as marcas serão verificadas para completude")
-            print()
-            
-            # 3. Processar TODAS as marcas (verifica cada uma para completude)
-            print("📊 ETAPA 3/3: Verificando e atualizando modelos (PARALELO - INCREMENTAL)...")
-            print("-" * 70)
-            print(f"🚀 Processando {min(self.max_workers, len(marcas_api))} marcas simultaneamente...")
-            print(f"📦 Total a verificar: {len(marcas_api)} marcas")
-            print(f"ℹ️  Processará apenas modelos novos de cada marca\n")
-            
-            inicio_paralelo = time.time()
-            
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                futures = [
-                    executor.submit(self.processar_marca, marca, i, len(marcas_api))
-                    for i, marca in enumerate(marcas_api, 1)
-                ]
+            # 2. Processar cada tipo de veículo
+            for tipo_veiculo in self.tipos_veiculo:
+                tipo_info = self.TIPOS_VEICULO[tipo_veiculo]
                 
-                # Aguarda todas as threads terminarem
-                for future in as_completed(futures):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        print(f"❌ Erro em thread: {e}")
-                        self.stats['erros'] += 1
-            
-            tempo_paralelo = time.time() - inicio_paralelo
-            print(f"\n✅ Verificação e atualização concluída em {tempo_paralelo/60:.1f} minutos")
-            print()
+                print(f"\n{tipo_info['emoji']} ETAPA 2/{len(self.tipos_veiculo)+1}: Processando {tipo_info['nome'].upper()}")
+                print("=" * 70)
+                
+                # 2.1. Buscar marcas da API
+                print(f"📊 Buscando marcas de {tipo_info['nome'].lower()}...")
+                print("-" * 70)
+                inicio_api = time.time()
+                marcas_api = buscar_marcas_carros(tipo_veiculo)
+                self.stats['tempo_api'] += time.time() - inicio_api
+                
+                if not marcas_api:
+                    print(f"⚠️  Nenhuma marca de {tipo_info['nome'].lower()} encontrada\n")
+                    continue
+                
+                # Salva novas marcas no cache local
+                inicio_db = time.time()
+                self.cache_local.save_marcas(marcas_api, tipo_veiculo)
+                self.stats['tempo_db_local'] += time.time() - inicio_db
+                
+                self.stats['marcas'] += len(marcas_api)
+                print(f"✅ {len(marcas_api)} marcas de {tipo_info['nome'].lower()} encontradas")
+                print(f"ℹ️  Todas as marcas serão verificadas para completude\n")
+                
+                # 2.2. Processar TODAS as marcas deste tipo
+                print(f"📊 Verificando e atualizando modelos de {tipo_info['nome'].upper()} (PARALELO)...")
+                print("-" * 70)
+                print(f"🚀 Processando {min(self.max_workers, len(marcas_api))} marcas simultaneamente...")
+                print(f"📦 Total a verificar: {len(marcas_api)} marcas")
+                print(f"ℹ️  Processará apenas modelos novos de cada marca\n")
+                
+                inicio_paralelo = time.time()
+                
+                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                    futures = [
+                        executor.submit(self.processar_marca, marca, i, len(marcas_api), tipo_veiculo)
+                        for i, marca in enumerate(marcas_api, 1)
+                    ]
+                    
+                    # Aguarda todas as threads terminarem
+                    for future in as_completed(futures):
+                        try:
+                            future.result()
+                        except Exception as e:
+                            print(f"❌ Erro em thread: {e}")
+                            self.stats['erros'] += 1
+                
+                tempo_paralelo = time.time() - inicio_paralelo
+                print(f"\n✅ {tipo_info['nome']} concluído em {tempo_paralelo/60:.1f} minutos")
+                print()
             
             # Resumo final
             self._imprimir_resumo()
@@ -530,6 +612,7 @@ class PopularBancoOtimizado:
             print(f"   • SQLite local {self.stats['modelos'] + self.stats['anos']} gravações instantâneas")
             print(f"   • Paralelização: {self.max_workers}x mais rápido")
         
+        
         print()
         print("💾 Todos os dados foram salvos no SQLite (fipe_local.db)!")
         print()
@@ -552,13 +635,40 @@ def main():
     print()
     print("⚠️  PROCESSO OTIMIZADO: SQLite Local + Paralelização")
     print("⚠️  Até 10x mais rápido que o modo tradicional!")
-    print("⚠️  Tempo estimado: 15-30 minutos (dependendo da conexão)")
+    print("⚠️  Tempo estimado: 15-30 minutos por tipo de veículo")
     print("⚠️  Resultado: Banco SQLite (fipe_local.db)")
     print()
     
     resposta = input("Deseja continuar? (s/n): ")
     
     if resposta.lower() in ['s', 'sim', 'y', 'yes']:
+        print()
+        
+        # Escolha de tipos de veículo
+        print("📋 Tipos de veículo disponíveis:")
+        print("   1. 🚗 Carros")
+        print("   2. 🏍️  Motos")
+        print("   3. 🚚 Caminhões")
+        print()
+        print("Escolha os tipos a processar:")
+        tipos_input = input("Digite os números separados por vírgula (ex: 1,2,3) ou Enter para todos: ")
+        
+        if tipos_input.strip():
+            try:
+                tipos_veiculo = [int(t.strip()) for t in tipos_input.split(',') if t.strip() in ['1', '2', '3']]
+                if not tipos_veiculo:
+                    print("⚠️  Nenhum tipo válido selecionado. Usando todos.")
+                    tipos_veiculo = [1, 2, 3]
+            except:
+                print("⚠️  Entrada inválida. Usando todos os tipos.")
+                tipos_veiculo = [1, 2, 3]
+        else:
+            tipos_veiculo = [1, 2, 3]
+        
+        # Mostra seleção
+        tipos_nomes = {1: "Carros", 2: "Motos", 3: "Caminhões"}
+        tipos_selecionados = [tipos_nomes[t] for t in tipos_veiculo]
+        print(f"\n✅ Tipos selecionados: {', '.join(tipos_selecionados)}")
         print()
         
         # Configuração de workers (padrão: 5)
@@ -570,7 +680,7 @@ def main():
             workers = 5
         
         print()
-        populator = PopularBancoOtimizado(max_workers=workers)
+        populator = PopularBancoOtimizado(max_workers=workers, tipos_veiculo=tipos_veiculo)
         populator.popular()
     else:
         print("\n❌ Operação cancelada pelo usuário.")

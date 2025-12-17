@@ -40,20 +40,24 @@ class FipeLocalCache:
         # Marcas
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS marcas (
-                codigo VARCHAR(10) PRIMARY KEY,
+                codigo VARCHAR(10),
+                tipo_veiculo INTEGER DEFAULT 1,
                 nome VARCHAR(100),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (codigo, tipo_veiculo)
             )
         ''')
         
         # Modelos
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS modelos (
-                codigo INTEGER PRIMARY KEY,
+                codigo INTEGER,
                 codigo_marca VARCHAR(10),
+                tipo_veiculo INTEGER DEFAULT 1,
                 nome VARCHAR(200),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (codigo_marca) REFERENCES marcas(codigo)
+                PRIMARY KEY (codigo, codigo_marca, tipo_veiculo),
+                FOREIGN KEY (codigo_marca, tipo_veiculo) REFERENCES marcas(codigo, tipo_veiculo)
             )
         ''')
         
@@ -94,7 +98,6 @@ class FipeLocalCache:
                 codigo_modelo INTEGER NOT NULL,
                 ano_modelo INTEGER NOT NULL,
                 codigo_combustivel INTEGER NOT NULL,
-                codigo_ano_combustivel VARCHAR(20),
                 valor VARCHAR(50) NOT NULL,
                 valor_numerico REAL,
                 codigo_fipe VARCHAR(20),
@@ -105,13 +108,14 @@ class FipeLocalCache:
                 modelo TEXT,
                 combustivel VARCHAR(100),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (codigo_marca, codigo_modelo, ano_modelo, codigo_combustivel, mes_referencia)
+                PRIMARY KEY (codigo_marca, codigo_modelo, tipo_veiculo, ano_modelo, codigo_combustivel, mes_referencia),
+                FOREIGN KEY (codigo_modelo, codigo_marca, tipo_veiculo) REFERENCES modelos(codigo, codigo_marca, tipo_veiculo) ON DELETE CASCADE
             )
         ''')
         
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_valores_fipe_veiculo ON valores_fipe(codigo_marca, codigo_modelo, ano_modelo, codigo_combustivel)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_valores_fipe_tipo_veiculo ON valores_fipe(tipo_veiculo)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_valores_fipe_mes ON valores_fipe(mes_referencia)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_valores_fipe_codigo_ano ON valores_fipe(codigo_ano_combustivel)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_valores_fipe_codigo_fipe ON valores_fipe(codigo_fipe)')
     
     def limpar_cache(self):
         """Remove todos os dados do cache local"""
@@ -132,28 +136,46 @@ class FipeLocalCache:
                 VALUES (?, ?)
             ''', (codigo, mes))
     
-    def save_marcas(self, marcas):
-        """Salva múltiplas marcas em lote"""
+    def save_marcas(self, marcas, tipo_veiculo=1):
+        """Salva múltiplas marcas em lote
+        
+        Args:
+            marcas: Lista de marcas da API
+            tipo_veiculo: Tipo de veículo (1=Carros, 2=Motos, 3=Caminhões)
+        """
         with self.write_lock:
             cursor = self.conn.cursor()
-            dados = [(m['Value'], m['Label']) for m in marcas]
+            dados = [(m['Value'], tipo_veiculo, m['Label']) for m in marcas]
             cursor.executemany('''
-                INSERT OR REPLACE INTO marcas (codigo, nome)
-                VALUES (?, ?)
-            ''', dados)
-    
-    def save_modelos(self, modelos, codigo_marca):
-        """Salva múltiplos modelos de uma marca em lote"""
-        with self.write_lock:
-            cursor = self.conn.cursor()
-            dados = [(m['Value'], codigo_marca, m['Label']) for m in modelos]
-            cursor.executemany('''
-                INSERT OR REPLACE INTO modelos (codigo, codigo_marca, nome)
+                INSERT OR REPLACE INTO marcas (codigo, tipo_veiculo, nome)
                 VALUES (?, ?, ?)
             ''', dados)
     
-    def save_anos_modelo(self, anos, codigo_marca, codigo_modelo):
-        """Salva anos/combustível de um modelo"""
+    def save_modelos(self, modelos, codigo_marca, tipo_veiculo=1):
+        """Salva múltiplos modelos de uma marca em lote
+        
+        Args:
+            modelos: Lista de modelos da API
+            codigo_marca: Código da marca
+            tipo_veiculo: Tipo de veículo (1=Carros, 2=Motos, 3=Caminhões)
+        """
+        with self.write_lock:
+            cursor = self.conn.cursor()
+            dados = [(m['Value'], codigo_marca, tipo_veiculo, m['Label']) for m in modelos]
+            cursor.executemany('''
+                INSERT OR REPLACE INTO modelos (codigo, codigo_marca, tipo_veiculo, nome)
+                VALUES (?, ?, ?, ?)
+            ''', dados)
+    
+    def save_anos_modelo(self, anos, codigo_marca, codigo_modelo, tipo_veiculo=1):
+        """Salva anos/combustível de um modelo
+        
+        Args:
+            anos: Lista de dicionários com Value e Label dos anos
+            codigo_marca: Código da marca
+            codigo_modelo: Código do modelo
+            tipo_veiculo: Tipo de veículo (1=Carros, 2=Motos, 3=Caminhões). Padrão: 1
+        """
         # Mapeamento de códigos para nomes de combustível
         combustiveis_map = {
             1: "Gasolina",
@@ -189,11 +211,11 @@ class FipeLocalCache:
                     VALUES (?, ?, ?, ?, ?)
                 ''', (codigo_ano, nome_ano, ano_valor, combustivel_valor, combustivel_nome))
             
-            # Salva relacionamento modelo-ano
-            dados = [(codigo_marca, codigo_modelo, ano['Value']) for ano in anos]
+            # Salva relacionamento modelo-ano com tipo_veiculo
+            dados = [(codigo_marca, codigo_modelo, tipo_veiculo, ano['Value']) for ano in anos]
             cursor.executemany('''
-                INSERT OR IGNORE INTO modelos_anos (codigo_marca, codigo_modelo, codigo_ano_combustivel)
-                VALUES (?, ?, ?)
+                INSERT OR IGNORE INTO modelos_anos (codigo_marca, codigo_modelo, tipo_veiculo, codigo_ano_combustivel)
+                VALUES (?, ?, ?, ?)
             ''', dados)
     
     def save_valor_fipe(self, valor_data, commit=True):
@@ -206,21 +228,18 @@ class FipeLocalCache:
         with self.write_lock:
             cursor = self.conn.cursor()
             
-            # Constrói codigo_ano_combustivel (ex: "2024-1")
-            codigo_ano_comb = f"{valor_data['ano_modelo']}-{valor_data['codigo_combustivel']}"
-            
             cursor.execute('''
                 INSERT OR REPLACE INTO valores_fipe (
-                    codigo_marca, codigo_modelo, ano_modelo, codigo_combustivel, codigo_ano_combustivel,
+                    codigo_marca, codigo_modelo, tipo_veiculo, ano_modelo, codigo_combustivel,
                     valor, valor_numerico, codigo_fipe, mes_referencia, codigo_referencia,
                     marca, modelo, combustivel, data_consulta
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 valor_data['codigo_marca'],
                 valor_data['codigo_modelo'],
+                valor_data.get('tipo_veiculo', 1),  # Default para carros se não especificado
                 valor_data['ano_modelo'],
                 valor_data['codigo_combustivel'],
-                codigo_ano_comb,
                 valor_data['valor'],
                 valor_data['valor_numerico'],
                 valor_data['codigo_fipe'],
@@ -231,6 +250,9 @@ class FipeLocalCache:
                 valor_data['combustivel'],
                 valor_data.get('data_consulta', 'CURRENT_TIMESTAMP')
             ))
+            
+            if commit:
+                self.conn.commit()
     
     def get_estatisticas(self):
         """Retorna estatísticas do cache local"""

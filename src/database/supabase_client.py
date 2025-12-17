@@ -1,6 +1,4 @@
 import os
-import ssl
-import certifi
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -13,10 +11,6 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 # Cliente Supabase (singleton)
 _supabase_client = None
-
-# Usa certificados padrão do sistema
-os.environ['SSL_CERT_FILE'] = certifi.where()
-os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
 
 
 def get_supabase_client() -> Client:
@@ -36,16 +30,8 @@ def get_supabase_client() -> Client:
                 "Verifique se o arquivo .env está configurado corretamente."
             )
         
-        # Desabilita verificação SSL (necessário em ambientes corporativos)
-        import warnings
-        warnings.filterwarnings('ignore', message='Unverified HTTPS request')
-        
-        # Desabilita verificação SSL globalmente
-        import ssl
-        ssl._create_default_https_context = ssl._create_unverified_context
-        
         _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        print("🔓 Conexão com Supabase (SSL verificação desabilitada)")
+        print("✅ Conexão com Supabase estabelecida")
     
     return _supabase_client
 
