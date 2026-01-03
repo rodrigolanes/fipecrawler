@@ -11,7 +11,7 @@ ROOT_DIR = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 import time
-import random
+from src.config import get_delay_padrao, DELAY_RATE_LIMIT_429
 from src.crawler.fipe_crawler import buscar_marcas_carros, buscar_modelos_por_ano, buscar_anos_modelo
 from src.cache.fipe_local_cache import FipeLocalCache
 
@@ -35,6 +35,7 @@ def atualizar_modelos():
     # Estatísticas
     stats = {
         'marcas_processadas': 0,
+        'marcas_novas': 0,
         'novos_modelos': 0,
         'novos_anos': 0,
         'erros': 0,
@@ -44,48 +45,101 @@ def atualizar_modelos():
     }
     
     try:
-        # Busca todas as marcas
-        print("📊 Buscando marcas cadastradas...")
+        # Busca todas as marcas da API FIPE
+        print("📊 Buscando marcas da API FIPE...")
         print("-" * 70)
-        marcas = buscar_marcas_carros()
-        total_marcas = len(marcas)
-        print(f"✅ {total_marcas} marcas encontradas\n")
+        marcas_api = buscar_marcas_carros()
+        total_marcas = len(marcas_api)
+        print(f"✅ {total_marcas} marcas na API\n")
+        
+        # Busca marcas já cadastradas no cache local
+        print("📦 Verificando marcas no cache local...")
+        print("-" * 70)
+        marcas_cache = cache.get_all_marcas()
+        codigos_cache = {marca['codigo'] for marca in marcas_cache}
+        print(f"✅ {len(marcas_cache)} marcas no cache\n")
+        
+        # Identifica marcas novas (na API mas não no cache)
+        marcas_novas = []
+        for marca in marcas_api:
+            if marca['Value'] not in codigos_cache:
+                marcas_novas.append(marca)
+        
+        if marcas_novas:
+            print(f"🆕 {len(marcas_novas)} MARCAS NOVAS encontradas!")
+            print("-" * 70)
+            for marca in marcas_novas:
+                print(f"   • {marca['Label']} (código {marca['Value']})")
+            print()
+            
+            # Salva marcas novas no cache
+            print("💾 Salvando marcas novas no cache...")
+            cache.save_marcas(marcas_novas)
+            stats['marcas_novas'] = len(marcas_novas)
+            print(f"✅ Marcas salvas!\n")
+        else:
+            print("ℹ️  Nenhuma marca nova. Cache está atualizado!\n")
         
         # Atualiza modelos de cada marca
         print("🔄 Buscando novos modelos Zero Km...")
         print("-" * 70)
         
+        marcas = marcas_api  # Processa todas as marcas da API
+        
         for i, marca in enumerate(marcas, 1):
             codigo_marca = marca['Value']
             nome_marca = marca['Label']
+            marca_nova = codigo_marca not in codigos_cache
             
-            print(f"[{i}/{total_marcas}] {nome_marca} (código {codigo_marca})")
+            marcador = "🆕" if marca_nova else "   "
+            print(f"{marcador}[{i}/{total_marcas}] {nome_marca} (código {codigo_marca})")
             
             try:
                 # Busca modelos existentes no cache
                 modelos_cache = cache.get_modelos_marca_dict(codigo_marca)
                 
-                # Busca novos modelos Zero Km em todos os combustíveis
+                # Para marcas novas, busca TODOS os modelos; para marcas existentes, apenas Zero Km
                 inicio_api = time.time()
                 novos = []
-                combustiveis = [1, 2, 3, 4, 5, 6, 7]  # Todos os tipos
                 
-                for combustivel in combustiveis:
-                    modelos_api = buscar_modelos_por_ano(
-                        codigo_marca, 
-                        ano_modelo="32000",
-                        codigo_combustivel=combustivel,
-                        nome_marca=nome_marca
-                    )
+                if marca_nova:
+                    # MARCA NOVA: Busca completa usando endpoint ConsultarModelos
+                    print(f"    🆕 Marca nova! Buscando TODOS os modelos...")
+                    from src.crawler.fipe_crawler import buscar_modelos
+                    resultado = buscar_modelos(codigo_marca, tipo_veiculo=1, nome_marca=nome_marca)
                     
-                    if modelos_api:
+                    if resultado and 'Modelos' in resultado:
+                        modelos_api = resultado['Modelos']
                         for modelo in modelos_api:
                             codigo_modelo = str(modelo.get('Value', ''))
                             if codigo_modelo and codigo_modelo not in modelos_cache:
                                 novos.append(modelo)
                                 modelos_cache[codigo_modelo] = modelo['Label']
+                        
+                        if novos:
+                            print(f"    ✅ {len(novos)} modelos encontrados (marca nova)")
+                    else:
+                        print(f"    ⚠️  Não foi possível buscar modelos da marca nova")
+                else:
+                    # MARCA EXISTENTE: Busca apenas modelos Zero Km
+                    combustiveis = [1, 2, 3, 4, 5, 6, 7]  # Todos os tipos
                     
-                    time.sleep(random.uniform(0.3, 0.5))
+                    for combustivel in combustiveis:
+                        modelos_api = buscar_modelos_por_ano(
+                            codigo_marca, 
+                            ano_modelo="32000",
+                            codigo_combustivel=combustivel,
+                            nome_marca=nome_marca
+                        )
+                        
+                        if modelos_api:
+                            for modelo in modelos_api:
+                                codigo_modelo = str(modelo.get('Value', ''))
+                                if codigo_modelo and codigo_modelo not in modelos_cache:
+                                    novos.append(modelo)
+                                    modelos_cache[codigo_modelo] = modelo['Label']
+                        
+                        # Delay já implementado em buscar_modelos_por_ano() no fipe_crawler.py
                 
                 stats['tempo_api'] += time.time() - inicio_api
                 
@@ -112,19 +166,13 @@ def atualizar_modelos():
                                 cache.save_anos_modelo(anos, codigo_marca, codigo_modelo, tipo_veiculo=1)
                                 stats['novos_anos'] += len(anos)
                             
-                            # Delay entre modelos
-                            inicio_delay = time.time()
-                            time.sleep(random.uniform(0.5, 1.0))
-                            stats['tempo_delays'] += time.time() - inicio_delay
+                            # Delay já implementado em buscar_anos_modelo() no fipe_crawler.py
                         
                         except Exception as e:
                             print(f"        ⚠️ Erro ao buscar anos: {e}")
                             stats['erros'] += 1
                 
-                # Delay entre marcas
-                inicio_delay = time.time()
-                time.sleep(random.uniform(2.0, 3.0))
-                stats['tempo_delays'] += time.time() - inicio_delay
+                # Delay já implementado em buscar_marcas_carros() no fipe_crawler.py
                 
             except Exception as e:
                 print(f"    ❌ Erro ao processar marca {nome_marca}: {e}")
@@ -138,6 +186,8 @@ def atualizar_modelos():
         print()
         print(f"📊 ESTATÍSTICAS:")
         print(f"   • Marcas processadas: {stats['marcas_processadas']}/{total_marcas}")
+        if stats['marcas_novas'] > 0:
+            print(f"   • 🆕 Marcas novas encontradas: {stats['marcas_novas']}")
         print(f"   • Novos modelos encontrados: {stats['novos_modelos']}")
         print(f"   • Anos/Combustível carregados: {stats['novos_anos']}")
         print(f"   • Erros: {stats['erros']}")
@@ -166,18 +216,25 @@ def atualizar_modelos():
                 print("   → Tempo gasto em comunicação com servidores")
         print()
         
-        if stats['novos_modelos'] > 0:
-            print("🎉 Novos modelos foram adicionados ao SQLite local!")
+        if stats['marcas_novas'] > 0 or stats['novos_modelos'] > 0:
+            print("🎉 Novidades encontradas e salvas no SQLite local!")
+            if stats['marcas_novas'] > 0:
+                print(f"   • {stats['marcas_novas']} marca(s) nova(s) adicionada(s)")
+            if stats['novos_modelos'] > 0:
+                print(f"   • {stats['novos_modelos']} modelo(s) novo(s) adicionado(s)")
+            print()
             print("💡 Execute upload_para_supabase.py para enviar ao Supabase.")
             print("💡 Depois execute atualizar_valores.py para buscar os preços.")
         else:
-            print("ℹ️  Nenhum modelo novo encontrado. Banco local está atualizado!")
+            print("ℹ️  Nenhuma novidade encontrada. Banco local está atualizado!")
         print()
     
     except KeyboardInterrupt:
         print("\n\n⚠️ Processo interrompido pelo usuário")
         print(f"📊 Estatísticas parciais:")
         print(f"   • Marcas processadas: {stats['marcas_processadas']}")
+        if stats['marcas_novas'] > 0:
+            print(f"   • Marcas novas: {stats['marcas_novas']}")
         print(f"   • Novos modelos: {stats['novos_modelos']}")
         print(f"   • Anos carregados: {stats['novos_anos']}")
         print()
@@ -186,6 +243,8 @@ def atualizar_modelos():
         print(f"\n\n❌ Erro fatal: {e}")
         print(f"📊 Estatísticas parciais:")
         print(f"   • Marcas processadas: {stats['marcas_processadas']}")
+        if stats['marcas_novas'] > 0:
+            print(f"   • Marcas novas: {stats['marcas_novas']}")
         print(f"   • Novos modelos: {stats['novos_modelos']}")
         print()
 

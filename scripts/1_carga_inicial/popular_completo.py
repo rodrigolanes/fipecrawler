@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT_DIR))
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Semaphore, Lock, current_thread
+from src.config import RETRY_BASE_WAIT, MAX_RETRIES
 from src.crawler.fipe_crawler import buscar_marcas_carros, buscar_modelos, buscar_anos_modelo, buscar_tabela_referencia, buscar_modelos_por_ano
 from src.cache.fipe_local_cache import FipeLocalCache
 
@@ -97,13 +98,7 @@ class PopularBancoOtimizado:
                 with self.lock:
                     self.stats['tempo_api'] += tempo_api
                 
-                # Delay após buscar modelos (2.0s fixo)
-                inicio_delay = time.time()
-                time.sleep(2.0)
-                tempo_delay = time.time() - inicio_delay
-                
-                with self.lock:
-                    self.stats['tempo_delays'] += tempo_delay
+                # Delay já implementado em buscar_modelos() no fipe_crawler.py
                 
                 if not resultado or 'Modelos' not in resultado:
                     print(f"[{worker_id}]     ⚠️ Nenhum modelo encontrado para {nome_marca} ({codigo_marca})")
@@ -220,13 +215,7 @@ class PopularBancoOtimizado:
                     
                     anos_total += len(anos)
                 
-                # Delay entre modelos (2.0s fixo)
-                inicio_delay = time.time()
-                time.sleep(2.0)
-                tempo_delay = time.time() - inicio_delay
-                
-                with self.lock:
-                    self.stats['tempo_delays'] += tempo_delay
+                # Delay já implementado em buscar_anos_modelo() no fipe_crawler.py
             
             except Exception as e:
                 print(f"[{worker_id}]         ⚠️ Erro: {nome_modelo} ({codigo_modelo}) - {e}")
@@ -339,13 +328,7 @@ class PopularBancoOtimizado:
                         # Adiciona relacionamento usando o código ano+combustível completo
                         relacionamentos.append((codigo_modelo, codigo_ano_completo, label_completo))
                 
-                # Delay entre requisições (2.0s fixo)
-                inicio_delay = time.time()
-                time.sleep(2.0)
-                tempo_delay = time.time() - inicio_delay
-                
-                with self.lock:
-                    self.stats['tempo_delays'] += tempo_delay
+                # Delay já implementado em buscar_modelos_por_ano() no fipe_crawler.py
             
             except Exception as e:
                 # Erros não-429 (já que retry interno trata 429)
@@ -395,7 +378,7 @@ class PopularBancoOtimizado:
         print(f"[{worker_id}]     📊 {total_requisicoes} requisições (economizou {economia} req, {economia_perc:.1f}%)")
         print()
     
-    def _buscar_modelos_com_retry(self, codigo_marca, nome_marca, worker_id, tipo_veiculo=1, max_retries=3):
+    def _buscar_modelos_com_retry(self, codigo_marca, nome_marca, worker_id, tipo_veiculo=1, max_retries=MAX_RETRIES):
         """Busca modelos com retry em caso de rate limiting"""
         for retry in range(max_retries):
             try:
@@ -403,20 +386,20 @@ class PopularBancoOtimizado:
             except Exception as e:
                 if "429" in str(e) or "too many" in str(e).lower():
                     if retry < max_retries - 1:
-                        wait_time = 5 * (2 ** retry)
+                        wait_time = RETRY_BASE_WAIT * (2 ** retry)
                         print(f"[{worker_id}]     ⚠️  Rate limit ao buscar modelos de {nome_marca} ({codigo_marca}). Aguardando {wait_time}s... (tentativa {retry+1}/{max_retries})")
                         time.sleep(wait_time)
                         with self.lock:
                             self.stats['tempo_delays'] += wait_time
                     else:
-                        # Após 3 tentativas, desiste e retorna None
+                        # Após tentativas, desiste e retorna None
                         print(f"[{worker_id}]     ❌ Rate limit persistente em {nome_marca} ({codigo_marca}) após {max_retries} tentativas")
                         return None
                 else:
                     raise
         return None
     
-    def _buscar_modelos_por_ano_com_retry(self, codigo_marca, ano_modelo, codigo_combustivel, nome_marca, tipo_veiculo, label_completo, worker_id, max_retries=3):
+    def _buscar_modelos_por_ano_com_retry(self, codigo_marca, ano_modelo, codigo_combustivel, nome_marca, tipo_veiculo, label_completo, worker_id, max_retries=MAX_RETRIES):
         """Busca modelos por ano com retry em caso de rate limiting"""
         for retry in range(max_retries):
             try:
@@ -430,20 +413,20 @@ class PopularBancoOtimizado:
             except Exception as e:
                 if "429" in str(e) or "too many" in str(e).lower():
                     if retry < max_retries - 1:
-                        wait_time = 5 * (2 ** retry)
+                        wait_time = RETRY_BASE_WAIT * (2 ** retry)
                         print(f"[{worker_id}]         ⚠️  Rate limit em {nome_marca} ({codigo_marca}) {label_completo}. Aguardando {wait_time}s... (tentativa {retry+1}/{max_retries})")
                         time.sleep(wait_time)
                         with self.lock:
                             self.stats['tempo_delays'] += wait_time
                     else:
-                        # Após 3 tentativas, desiste e retorna lista vazia
+                        # Após tentativas, desiste e retorna lista vazia
                         print(f"[{worker_id}]         ❌ Rate limit persistente em {nome_marca} ({codigo_marca}) {label_completo} após {max_retries} tentativas")
                         return []
                 else:
                     raise
         return []
     
-    def _buscar_anos_com_retry(self, codigo_marca, codigo_modelo, worker_id, nome_modelo="", tipo_veiculo=1, max_retries=3):
+    def _buscar_anos_com_retry(self, codigo_marca, codigo_modelo, worker_id, nome_modelo="", tipo_veiculo=1, max_retries=MAX_RETRIES):
         """Busca anos com retry em caso de rate limiting"""
         for retry in range(max_retries):
             try:
@@ -451,14 +434,14 @@ class PopularBancoOtimizado:
             except Exception as e:
                 if "429" in str(e) or "too many" in str(e).lower():
                     if retry < max_retries - 1:
-                        wait_time = 5 * (2 ** retry)
+                        wait_time = RETRY_BASE_WAIT * (2 ** retry)
                         modelo_info = f"{nome_modelo} ({codigo_modelo})" if nome_modelo else codigo_modelo
                         print(f"[{worker_id}]         ⚠️ Rate limit em {modelo_info}. Aguardando {wait_time}s... (tentativa {retry+1}/{max_retries})")
                         time.sleep(wait_time)
                         with self.lock:
                             self.stats['tempo_delays'] += wait_time
                     else:
-                        # Após 3 tentativas, desiste e propaga exceção
+                        # Após tentativas, desiste e propaga exceção
                         print(f"[{worker_id}]         ❌ Rate limit persistente em {modelo_info} após {max_retries} tentativas")
                         raise
                 else:

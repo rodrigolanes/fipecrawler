@@ -2,6 +2,15 @@ import requests
 import json
 import urllib3
 import time
+import sys
+from pathlib import Path
+
+# Adiciona o diretório src ao path para importar config
+src_path = Path(__file__).parent.parent
+if str(src_path) not in sys.path:
+    sys.path.insert(0, str(src_path))
+
+from config import get_delay_padrao
 
 # Desabilita avisos de SSL (apenas para desenvolvimento)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -52,19 +61,37 @@ def buscar_tabela_referencia():
     Returns:
         list: Lista de tabelas de referência com Codigo e Mes
     """
+    from config import MAX_RETRIES, RETRY_BASE_WAIT, DELAY_RATE_LIMIT_429
+    
     url = "https://veiculos.fipe.org.br/api/veiculos/ConsultarTabelaDeReferencia"
     session = get_session()
     
-    try:
-        response = session.post(url, data={}, verify=False)
-        response.raise_for_status()
+    for retry in range(MAX_RETRIES):
+        try:
+            response = session.post(url, data={}, verify=False)
+            response.raise_for_status()
+            
+            tabelas = response.json()
+            time.sleep(get_delay_padrao())  # Delay padrão entre requisições
+            return tabelas
         
-        tabelas = response.json()
-        return tabelas
+        except requests.exceptions.HTTPError as e:
+            if '429' in str(e) or (hasattr(e.response, 'status_code') and e.response.status_code == 429):
+                if retry < MAX_RETRIES - 1:
+                    wait_time = RETRY_BASE_WAIT * (2 ** retry)
+                    print(f"⚠️  Rate limit na tabela de referência. Aguardando {wait_time}s... (tentativa {retry+1}/{MAX_RETRIES})")
+                    time.sleep(wait_time)
+                else:
+                    print(f"❌ Rate limit persistente na tabela de referência após {MAX_RETRIES} tentativas")
+                    return []
+            else:
+                print(f"Erro ao fazer requisição: {e}")
+                return []
+        except requests.exceptions.RequestException as e:
+            print(f"Erro ao fazer requisição: {e}")
+            return []
     
-    except requests.exceptions.RequestException as e:
-        print(f"Erro ao fazer requisição: {e}")
-        return []
+    return []
 
 
 def obter_codigo_referencia_atual():
@@ -90,6 +117,8 @@ def buscar_marcas_carros(tipo_veiculo=1):
     Returns:
         list: Lista de marcas de veículos
     """
+    from config import MAX_RETRIES, RETRY_BASE_WAIT, DELAY_RATE_LIMIT_429
+    
     tipos_nome = {1: "carros", 2: "motos", 3: "caminhões"}
     print(f"🌐 Buscando marcas de {tipos_nome.get(tipo_veiculo, 'veículos')} da API da FIPE...")
     url = "https://veiculos.fipe.org.br/api/veiculos/ConsultarMarcas"
@@ -100,18 +129,33 @@ def buscar_marcas_carros(tipo_veiculo=1):
         "codigoTipoVeiculo": tipo_veiculo
     }
     
-    try:
-        response = session.post(url, data=payload, verify=False)
-        response.raise_for_status()  # Levanta exceção se houver erro HTTP
+    for retry in range(MAX_RETRIES):
+        try:
+            response = session.post(url, data=payload, verify=False)
+            response.raise_for_status()  # Levanta exceção se houver erro HTTP
+            
+            # Retornando os dados em formato JSON
+            marcas = response.json()
+            time.sleep(get_delay_padrao())  # Delay padrão entre requisições
+            return marcas
         
-        # Retornando os dados em formato JSON
-        marcas = response.json()
-        
-        return marcas
+        except requests.exceptions.HTTPError as e:
+            if '429' in str(e) or (hasattr(e.response, 'status_code') and e.response.status_code == 429):
+                if retry < MAX_RETRIES - 1:
+                    wait_time = RETRY_BASE_WAIT * (2 ** retry)
+                    print(f"⚠️  Rate limit ao buscar marcas. Aguardando {wait_time}s... (tentativa {retry+1}/{MAX_RETRIES})")
+                    time.sleep(wait_time)
+                else:
+                    print(f"❌ Rate limit persistente ao buscar marcas após {MAX_RETRIES} tentativas")
+                    raise
+            else:
+                print(f"Erro ao fazer requisição: {e}")
+                raise
+        except requests.exceptions.RequestException as e:
+            print(f"Erro ao fazer requisição: {e}")
+            raise
     
-    except requests.exceptions.RequestException as e:
-        print(f"Erro ao fazer requisição: {e}")
-        raise  # Levanta exceção para permitir retry em níveis superiores
+    return []
 
 
 def buscar_modelos(codigo_marca, tipo_veiculo=1, nome_marca=None):
@@ -129,6 +173,8 @@ def buscar_modelos(codigo_marca, tipo_veiculo=1, nome_marca=None):
     """
     # IMPORTANTE: Sempre busca da API para obter os Anos, mesmo que modelos estejam em cache
     # A API retorna tanto Modelos quanto Anos em uma única requisição
+    from config import MAX_RETRIES, RETRY_BASE_WAIT, DELAY_RATE_LIMIT_429
+    
     marca_info = f"{nome_marca} ({codigo_marca})" if nome_marca else codigo_marca
     print(f"🌐 Buscando modelos da marca {marca_info} da API da FIPE...")
     url = "https://veiculos.fipe.org.br/api/veiculos/ConsultarModelos"
@@ -140,24 +186,33 @@ def buscar_modelos(codigo_marca, tipo_veiculo=1, nome_marca=None):
         "codigoMarca": codigo_marca
     }
     
-    try:
-        response = session.post(url, data=payload, verify=False)
-        response.raise_for_status()
+    for retry in range(MAX_RETRIES):
+        try:
+            response = session.post(url, data=payload, verify=False)
+            response.raise_for_status()
+            
+            dados = response.json()
+            time.sleep(get_delay_padrao())  # Delay padrão entre requisições
+            return dados
         
-        dados = response.json()
-        
-        return dados
+        except requests.exceptions.HTTPError as e:
+            # Trata erro 429 com retry
+            if '429' in str(e) or (hasattr(e.response, 'status_code') and e.response.status_code == 429):
+                if retry < MAX_RETRIES - 1:
+                    wait_time = RETRY_BASE_WAIT * (2 ** retry)
+                    print(f"   ⚠️  Rate limit em {marca_info}. Aguardando {wait_time}s... (tentativa {retry+1}/{MAX_RETRIES})")
+                    time.sleep(wait_time)
+                else:
+                    print(f"   ❌ Rate limit persistente em {marca_info} após {MAX_RETRIES} tentativas")
+                    return None
+            else:
+                print(f"   ❌ Erro HTTP: {e}")
+                return None
+        except requests.exceptions.RequestException as e:
+            print(f"Erro ao fazer requisição: {e}")
+            return None
     
-    except requests.exceptions.HTTPError as e:
-        # Propaga erro 429 para tratamento superior
-        if '429' in str(e) or (hasattr(e.response, 'status_code') and e.response.status_code == 429):
-            print(f"   ❌ Erro 429 (rate limit): {e}")
-            raise  # Propaga para que seja capturado pelo retry
-        print(f"   ❌ Erro HTTP: {e}")
-        return None
-    except requests.exceptions.RequestException as e:
-        print(f"Erro ao fazer requisição: {e}")
-        return None
+    return None
 
 
 def buscar_anos_modelo(codigo_marca, codigo_modelo, tipo_veiculo=1, nome_modelo=None):
@@ -173,6 +228,8 @@ def buscar_anos_modelo(codigo_marca, codigo_modelo, tipo_veiculo=1, nome_modelo=
     Returns:
         list: Lista de anos disponíveis com Label e Value
     """
+    from config import MAX_RETRIES, RETRY_BASE_WAIT, DELAY_RATE_LIMIT_429
+    
     modelo_info = f"{nome_modelo} ({codigo_modelo})" if nome_modelo else codigo_modelo
     print(f"🌐 Buscando anos do modelo {modelo_info} da API da FIPE...")
     url = "https://veiculos.fipe.org.br/api/veiculos/ConsultarAnoModelo"
@@ -185,65 +242,75 @@ def buscar_anos_modelo(codigo_marca, codigo_modelo, tipo_veiculo=1, nome_modelo=
         "codigoModelo": codigo_modelo
     }
     
-    try:
-        response = session.post(url, data=payload, verify=False)
-        response.raise_for_status()
+    for retry in range(MAX_RETRIES):
+        try:
+            response = session.post(url, data=payload, verify=False)
+            response.raise_for_status()
+            
+            # Força encoding UTF-8
+            response.encoding = 'utf-8-sig'  # utf-8-sig remove BOM automaticamente
+            
+            # Verifica se resposta está vazia
+            if not response.text or response.text.strip() == '':
+                print(f"   ℹ️  Resposta vazia (modelo sem anos cadastrados)")
+                return []
+            
+            # Limpeza agressiva: encontra o primeiro caractere válido JSON
+            texto_limpo = response.text.strip()
+            
+            # Remove tudo antes do primeiro [ ou {
+            primeiro_bracket = texto_limpo.find('[')
+            primeiro_brace = texto_limpo.find('{')
+            
+            if primeiro_bracket != -1 and (primeiro_brace == -1 or primeiro_bracket < primeiro_brace):
+                texto_limpo = texto_limpo[primeiro_bracket:]
+                # Remove tudo após o ] final
+                ultimo_bracket = texto_limpo.rfind(']')
+                if ultimo_bracket != -1:
+                    texto_limpo = texto_limpo[:ultimo_bracket + 1]
+            elif primeiro_brace != -1:
+                texto_limpo = texto_limpo[primeiro_brace:]
+                # Remove tudo após o } final
+                ultimo_brace = texto_limpo.rfind('}')
+                if ultimo_brace != -1:
+                    texto_limpo = texto_limpo[:ultimo_brace + 1]
+            
+            anos = json.loads(texto_limpo)
+            
+            # Verifica se é erro conhecido
+            if isinstance(anos, dict) and anos.get('erro'):
+                print(f"   ℹ️  API retornou erro: {anos.get('erro')}")
+                return []
+            
+            if isinstance(anos, list) and anos:
+                print(f"✅ {len(anos)} anos encontrados")
+            
+            time.sleep(get_delay_padrao())  # Delay padrão entre requisições
+            return anos if isinstance(anos, list) else []
         
-        # Força encoding UTF-8
-        response.encoding = 'utf-8-sig'  # utf-8-sig remove BOM automaticamente
-        
-        # Verifica se resposta está vazia
-        if not response.text or response.text.strip() == '':
-            print(f"   ℹ️  Resposta vazia (modelo sem anos cadastrados)")
+        except json.JSONDecodeError as e:
+            print(f"   ⚠️  JSON inválido após limpeza.")
+            print(f"   📄 Texto: {texto_limpo[:200] if 'texto_limpo' in locals() else response.text[:200]}")
+            print(f"   ❌ Erro: {e}")
             return []
-        
-        # Limpeza agressiva: encontra o primeiro caractere válido JSON
-        texto_limpo = response.text.strip()
-        
-        # Remove tudo antes do primeiro [ ou {
-        primeiro_bracket = texto_limpo.find('[')
-        primeiro_brace = texto_limpo.find('{')
-        
-        if primeiro_bracket != -1 and (primeiro_brace == -1 or primeiro_bracket < primeiro_brace):
-            texto_limpo = texto_limpo[primeiro_bracket:]
-            # Remove tudo após o ] final
-            ultimo_bracket = texto_limpo.rfind(']')
-            if ultimo_bracket != -1:
-                texto_limpo = texto_limpo[:ultimo_bracket + 1]
-        elif primeiro_brace != -1:
-            texto_limpo = texto_limpo[primeiro_brace:]
-            # Remove tudo após o } final
-            ultimo_brace = texto_limpo.rfind('}')
-            if ultimo_brace != -1:
-                texto_limpo = texto_limpo[:ultimo_brace + 1]
-        
-        anos = json.loads(texto_limpo)
-        
-        # Verifica se é erro conhecido
-        if isinstance(anos, dict) and anos.get('erro'):
-            print(f"   ℹ️  API retornou erro: {anos.get('erro')}")
+        except requests.exceptions.HTTPError as e:
+            # Trata erro 429 com retry
+            if '429' in str(e) or (hasattr(e.response, 'status_code') and e.response.status_code == 429):
+                if retry < MAX_RETRIES - 1:
+                    wait_time = RETRY_BASE_WAIT * (2 ** retry)
+                    print(f"   ⚠️  Rate limit em {modelo_info}. Aguardando {wait_time}s... (tentativa {retry+1}/{MAX_RETRIES})")
+                    time.sleep(wait_time)
+                else:
+                    print(f"   ❌ Rate limit persistente em {modelo_info} após {MAX_RETRIES} tentativas")
+                    return []
+            else:
+                print(f"   ❌ Erro HTTP: {e}")
+                return []
+        except requests.exceptions.RequestException as e:
+            print(f"   ❌ Erro de rede: {e}")
             return []
-        
-        if isinstance(anos, list) and anos:
-            print(f"✅ {len(anos)} anos encontrados")
-        
-        return anos if isinstance(anos, list) else []
     
-    except json.JSONDecodeError as e:
-        print(f"   ⚠️  JSON inválido após limpeza.")
-        print(f"   📄 Texto: {texto_limpo[:200] if 'texto_limpo' in locals() else response.text[:200]}")
-        print(f"   ❌ Erro: {e}")
-        return []
-    except requests.exceptions.HTTPError as e:
-        # Propaga erro 429 para tratamento superior
-        if '429' in str(e) or (hasattr(e.response, 'status_code') and e.response.status_code == 429):
-            print(f"   ❌ Erro 429 (rate limit): {e}")
-            raise  # Propaga para que seja capturado pelo retry
-        print(f"   ❌ Erro HTTP: {e}")
-        return []
-    except requests.exceptions.RequestException as e:
-        print(f"   ❌ Erro de rede: {e}")
-        return []
+    return []
 
 
 def buscar_modelos_por_ano(codigo_marca, ano_modelo="32000", codigo_combustivel=1, nome_marca=None, tipo_veiculo=1):
@@ -267,6 +334,8 @@ def buscar_modelos_por_ano(codigo_marca, ano_modelo="32000", codigo_combustivel=
     Returns:
         list: Lista de modelos encontrados
     """
+    from config import MAX_RETRIES, RETRY_BASE_WAIT, DELAY_RATE_LIMIT_429
+    
     combustivel_nome = {1: "Gasolina", 2: "Álcool", 3: "Diesel", 4: "Elétrico", 5: "Flex", 6: "Híbrido"}
     marca_info = f"{nome_marca} ({codigo_marca})" if nome_marca else codigo_marca
     print(f"🌐 Buscando modelos {ano_modelo} ({combustivel_nome.get(codigo_combustivel, 'Outro')}) de {marca_info}...")
@@ -289,78 +358,88 @@ def buscar_modelos_por_ano(codigo_marca, ano_modelo="32000", codigo_combustivel=
         "modeloCodigoExterno": ""
     }
     
-    try:
-        response = session.post(url, data=payload, verify=False)
-        response.raise_for_status()
-        
-        # Força encoding UTF-8
-        response.encoding = 'utf-8-sig'  # utf-8-sig remove BOM automaticamente
-        
-        # Verifica se resposta está vazia
-        if not response.text or response.text.strip() == '':
-            print(f"   ℹ️  Resposta vazia (ano/combustível não disponível)")
-            return []
-        
-        # Limpeza agressiva: encontra o primeiro caractere válido JSON
-        texto_limpo = response.text.strip()
-        
-        # Remove tudo antes do primeiro [ ou {
-        primeiro_bracket = texto_limpo.find('[')
-        primeiro_brace = texto_limpo.find('{')
-        
-        if primeiro_bracket != -1 and (primeiro_brace == -1 or primeiro_bracket < primeiro_brace):
-            texto_limpo = texto_limpo[primeiro_bracket:]
-            # Remove tudo após o ] final
-            ultimo_bracket = texto_limpo.rfind(']')
-            if ultimo_bracket != -1:
-                texto_limpo = texto_limpo[:ultimo_bracket + 1]
-        elif primeiro_brace != -1:
-            texto_limpo = texto_limpo[primeiro_brace:]
-            # Remove tudo após o } final
-            ultimo_brace = texto_limpo.rfind('}')
-            if ultimo_brace != -1:
-                texto_limpo = texto_limpo[:ultimo_brace + 1]
-        
-        modelos = json.loads(texto_limpo)
-        
-        # Verifica se API retornou erro "nadaencontrado"
-        if isinstance(modelos, dict):
-            if modelos.get('erro') == 'nadaencontrado':
-                print(f"   ℹ️  Nenhum modelo (API: nadaencontrado)")
-                return []
-            else:
-                print(f"   ⚠️  API retornou dict inesperado: {modelos}")
-                return []
-        
-        # Log detalhado dos modelos encontrados
-        if modelos and isinstance(modelos, list):
-            print(f"✅ {len(modelos)} modelos encontrados")
+    for retry in range(MAX_RETRIES):
+        try:
+            response = session.post(url, data=payload, verify=False)
+            response.raise_for_status()
             
-            # Se poucos modelos, mostra os nomes para validação
-            if len(modelos) <= 5:
-                for modelo in modelos:
-                    if isinstance(modelo, dict) and 'Label' in modelo:
-                        print(f"   • {modelo['Label']} ({modelo.get('Value', '?')})")
-        elif not isinstance(modelos, list):
-            print(f"   ⚠️  Resposta não é lista: {type(modelos)}")
-            return []
+            # Força encoding UTF-8
+            response.encoding = 'utf-8-sig'  # utf-8-sig remove BOM automaticamente
+            
+            # Verifica se resposta está vazia
+            if not response.text or response.text.strip() == '':
+                print(f"   ℹ️  Resposta vazia (ano/combustível não disponível)")
+                return []
+            
+            # Limpeza agressiva: encontra o primeiro caractere válido JSON
+            texto_limpo = response.text.strip()
+            
+            # Remove tudo antes do primeiro [ ou {
+            primeiro_bracket = texto_limpo.find('[')
+            primeiro_brace = texto_limpo.find('{')
+            
+            if primeiro_bracket != -1 and (primeiro_brace == -1 or primeiro_bracket < primeiro_brace):
+                texto_limpo = texto_limpo[primeiro_bracket:]
+                # Remove tudo após o ] final
+                ultimo_bracket = texto_limpo.rfind(']')
+                if ultimo_bracket != -1:
+                    texto_limpo = texto_limpo[:ultimo_bracket + 1]
+            elif primeiro_brace != -1:
+                texto_limpo = texto_limpo[primeiro_brace:]
+                # Remove tudo após o } final
+                ultimo_brace = texto_limpo.rfind('}')
+                if ultimo_brace != -1:
+                    texto_limpo = texto_limpo[:ultimo_brace + 1]
+            
+            modelos = json.loads(texto_limpo)
+            
+            # Verifica se API retornou erro "nadaencontrado"
+            if isinstance(modelos, dict):
+                if modelos.get('erro') == 'nadaencontrado':
+                    print(f"   ℹ️  Nenhum modelo (API: nadaencontrado)")
+                    return []
+                else:
+                    print(f"   ⚠️  API retornou dict inesperado: {modelos}")
+                    return []
+            
+            # Log detalhado dos modelos encontrados
+            if modelos and isinstance(modelos, list):
+                print(f"✅ {len(modelos)} modelos encontrados")
+                
+                # Se poucos modelos, mostra os nomes para validação
+                if len(modelos) <= 5:
+                    for modelo in modelos:
+                        if isinstance(modelo, dict) and 'Label' in modelo:
+                            print(f"   • {modelo['Label']} ({modelo.get('Value', '?')})")
+            elif not isinstance(modelos, list):
+                print(f"   ⚠️  Resposta não é lista: {type(modelos)}")
+                return []
+            
+            time.sleep(get_delay_padrao())  # Delay padrão entre requisições
+            return modelos if isinstance(modelos, list) else []
         
-        return modelos if isinstance(modelos, list) else []
+        except json.JSONDecodeError as e:
+            # Mostra o conteúdo que causou erro de parse
+            print(f"   ⚠️  JSON inválido após limpeza: {texto_limpo[:100] if 'texto_limpo' in locals() else response.text[:100]}")
+            return []
+        except requests.exceptions.HTTPError as e:
+            # Trata erro 429 com retry
+            if '429' in str(e) or (hasattr(e.response, 'status_code') and e.response.status_code == 429):
+                if retry < MAX_RETRIES - 1:
+                    wait_time = RETRY_BASE_WAIT * (2 ** retry)
+                    print(f"   ⚠️  Rate limit em {marca_info}. Aguardando {wait_time}s... (tentativa {retry+1}/{MAX_RETRIES})")
+                    time.sleep(wait_time)
+                else:
+                    print(f"   ❌ Rate limit persistente em {marca_info} após {MAX_RETRIES} tentativas")
+                    return []
+            else:
+                print(f"   ❌ Erro HTTP: {e}")
+                return []
+        except requests.exceptions.RequestException as e:
+            print(f"   ❌ Erro de rede: {e}")
+            return []
     
-    except json.JSONDecodeError as e:
-        # Mostra o conteúdo que causou erro de parse
-        print(f"   ⚠️  JSON inválido após limpeza: {texto_limpo[:100] if 'texto_limpo' in locals() else response.text[:100]}")
-        return []
-    except requests.exceptions.HTTPError as e:
-        # Propaga erro 429 para tratamento superior
-        if '429' in str(e) or (hasattr(e.response, 'status_code') and e.response.status_code == 429):
-            print(f"   ❌ Erro 429 (rate limit): {e}")
-            raise  # Propaga para que seja capturado pelo retry
-        print(f"   ❌ Erro HTTP: {e}")
-        return []
-    except requests.exceptions.RequestException as e:
-        print(f"   ❌ Erro de rede: {e}")
-        return []
+    return []
 
 
 def buscar_valor_veiculo(codigo_marca, codigo_modelo, ano_modelo, codigo_combustivel, tipo_veiculo=1, codigo_ref=None):
@@ -378,6 +457,8 @@ def buscar_valor_veiculo(codigo_marca, codigo_modelo, ano_modelo, codigo_combust
     Returns:
         dict: Dicionário com todas as informações do veículo incluindo valor FIPE
     """
+    from config import MAX_RETRIES, RETRY_BASE_WAIT, DELAY_RATE_LIMIT_429
+    
     print(f"🌐 Buscando valor do veículo da API da FIPE...")
     url = "https://veiculos.fipe.org.br/api/veiculos/ConsultarValorComTodosParametros"
     session = get_session()
@@ -401,17 +482,33 @@ def buscar_valor_veiculo(codigo_marca, codigo_modelo, ano_modelo, codigo_combust
         "tipoConsulta": "tradicional"
     }
     
-    try:
-        response = session.post(url, data=payload, verify=False)
-        response.raise_for_status()
+    for retry in range(MAX_RETRIES):
+        try:
+            response = session.post(url, data=payload, verify=False)
+            response.raise_for_status()
+            
+            dados = response.json()
+            time.sleep(get_delay_padrao())  # Delay padrão entre requisições
+            return dados
         
-        dados = response.json()
-        
-        return dados
+        except requests.exceptions.HTTPError as e:
+            # Trata erro 429 com retry
+            if '429' in str(e) or (hasattr(e.response, 'status_code') and e.response.status_code == 429):
+                if retry < MAX_RETRIES - 1:
+                    wait_time = RETRY_BASE_WAIT * (2 ** retry)
+                    print(f"   ⚠️  Rate limit ao buscar valor. Aguardando {wait_time}s... (tentativa {retry+1}/{MAX_RETRIES})")
+                    time.sleep(wait_time)
+                else:
+                    print(f"   ❌ Rate limit persistente ao buscar valor após {MAX_RETRIES} tentativas")
+                    return None
+            else:
+                print(f"Erro ao fazer requisição: {e}")
+                return None
+        except requests.exceptions.RequestException as e:
+            print(f"Erro ao fazer requisição: {e}")
+            return None
     
-    except requests.exceptions.RequestException as e:
-        print(f"Erro ao fazer requisição: {e}")
-        return None
+    return None
 
 
 def atualizar_modelos_marca(codigo_marca, incluir_ano_atual=True):

@@ -11,12 +11,12 @@ ROOT_DIR = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 import time
-import random
+from src.config import get_delay_padrao, DELAY_RATE_LIMIT_429, RETRY_BASE_WAIT, MAX_RETRIES
 from src.crawler.fipe_crawler import buscar_marcas_carros, buscar_modelos, buscar_anos_modelo
 from src.cache.fipe_local_cache import FipeLocalCache
 
 
-def buscar_marcas_com_retry(tipo_veiculo, stats=None, max_retries=3):
+def buscar_marcas_com_retry(tipo_veiculo, stats=None, max_retries=MAX_RETRIES):
     """Busca marcas com retry em caso de rate limiting"""
     for retry in range(max_retries):
         try:
@@ -26,7 +26,7 @@ def buscar_marcas_com_retry(tipo_veiculo, stats=None, max_retries=3):
                 if stats:
                     stats['retries_429'] += 1
                 if retry < max_retries - 1:
-                    wait_time = 10 * (2 ** retry)  # 10s, 20s, 40s
+                    wait_time = RETRY_BASE_WAIT * (2 ** retry)  # 5s, 10s, 20s (baseado em config)
                     print(f"⚠️  Rate limit ao buscar marcas. Aguardando {wait_time}s... (tentativa {retry+1}/{max_retries})")
                     time.sleep(wait_time)
                 else:
@@ -37,7 +37,7 @@ def buscar_marcas_com_retry(tipo_veiculo, stats=None, max_retries=3):
     return None
 
 
-def buscar_modelos_com_retry(codigo_marca, tipo_veiculo, nome_marca, stats=None, max_retries=3):
+def buscar_modelos_com_retry(codigo_marca, tipo_veiculo, nome_marca, stats=None, max_retries=MAX_RETRIES):
     """Busca modelos com retry em caso de rate limiting"""
     for retry in range(max_retries):
         try:
@@ -47,7 +47,7 @@ def buscar_modelos_com_retry(codigo_marca, tipo_veiculo, nome_marca, stats=None,
                 if stats:
                     stats['retries_429'] += 1
                 if retry < max_retries - 1:
-                    wait_time = 5 * (2 ** retry)
+                    wait_time = RETRY_BASE_WAIT * (2 ** retry)
                     print(f"    ⚠️  Rate limit ao buscar modelos de {nome_marca} ({codigo_marca}). Aguardando {wait_time}s... (tentativa {retry+1}/{max_retries})")
                     time.sleep(wait_time)
                 else:
@@ -58,7 +58,7 @@ def buscar_modelos_com_retry(codigo_marca, tipo_veiculo, nome_marca, stats=None,
     return None
 
 
-def buscar_anos_com_retry(codigo_marca, codigo_modelo, tipo_veiculo, nome_modelo, stats=None, max_retries=3):
+def buscar_anos_com_retry(codigo_marca, codigo_modelo, tipo_veiculo, nome_modelo, stats=None, max_retries=MAX_RETRIES):
     """Busca anos com retry em caso de rate limiting"""
     for retry in range(max_retries):
         try:
@@ -68,7 +68,7 @@ def buscar_anos_com_retry(codigo_marca, codigo_modelo, tipo_veiculo, nome_modelo
                 if stats:
                     stats['retries_429'] += 1
                 if retry < max_retries - 1:
-                    wait_time = 5 * (2 ** retry)
+                    wait_time = RETRY_BASE_WAIT * (2 ** retry)
                     modelo_info = f"{nome_modelo} ({codigo_modelo})" if nome_modelo else codigo_modelo
                     print(f"      ⚠️ Rate limit em {modelo_info}. Aguardando {wait_time}s... (tentativa {retry+1}/{max_retries})")
                     time.sleep(wait_time)
@@ -81,7 +81,7 @@ def buscar_anos_com_retry(codigo_marca, codigo_modelo, tipo_veiculo, nome_modelo
     return None
 
 
-def buscar_modelos_por_ano_com_retry(codigo_marca, ano_modelo, codigo_combustivel, nome_marca, tipo_veiculo, label_completo, stats=None, max_retries=3):
+def buscar_modelos_por_ano_com_retry(codigo_marca, ano_modelo, codigo_combustivel, nome_marca, tipo_veiculo, label_completo, stats=None, max_retries=MAX_RETRIES):
     """Busca modelos por ano com retry em caso de rate limiting"""
     from src.crawler.fipe_crawler import buscar_modelos_por_ano
     
@@ -99,7 +99,7 @@ def buscar_modelos_por_ano_com_retry(codigo_marca, ano_modelo, codigo_combustive
                 if stats:
                     stats['retries_429'] += 1
                 if retry < max_retries - 1:
-                    wait_time = 5 * (2 ** retry)
+                    wait_time = RETRY_BASE_WAIT * (2 ** retry)
                     print(f"      ⚠️ Rate limit em {nome_marca} ({codigo_marca}) {label_completo}. Aguardando {wait_time}s... (tentativa {retry+1}/{max_retries})")
                     time.sleep(wait_time)
                 else:
@@ -136,8 +136,7 @@ def processar_por_modelo(cache, codigo_marca, nome_marca, modelos, stats, tipo_v
                 if j % 10 == 0:
                     print(f"    Progresso: {j}/{len(modelos)} modelos ({stats['relacionamentos_criados']} relacionamentos)")
             
-            # Delay entre modelos (2.0s fixo)
-            time.sleep(2.0)
+            # Delay já implementado em buscar_anos_modelo() no fipe_crawler.py
         
         except Exception as e:
             print(f"    ❌ Erro no modelo {j}: {e}")

@@ -250,11 +250,37 @@ def _parse_valor(self, valor_texto: str) -> float:
 
 ### 4. Delays Entre Requisições
 
-Para evitar bloqueio por rate limiting:
+**IMPORTANTE**: Delays estão centralizados em `src/config.py` e implementados no módulo base `fipe_crawler.py`.
 
+**Configuração atual** (testada e validada):
 ```python
-time.sleep(0.1)  # Entre modelos (100ms)
-time.sleep(0.2)  # Entre marcas (200ms)
+from src.config import get_delay_padrao, DELAY_RATE_LIMIT_429
+
+# Delay padrão entre requisições (0.8-1.2s randomizado)
+time.sleep(get_delay_padrao())
+
+# Delay após erro 429 (rate limit)
+time.sleep(DELAY_RATE_LIMIT_429)  # 30s
+```
+
+**Regras**:
+- ✅ Delays JÁ implementados em todas as funções de `fipe_crawler.py`
+- ❌ NÃO adicione `time.sleep()` nos scripts que chamam essas funções (duplicação!)
+- ✅ Use apenas para delays de retry em caso de erro 429
+- ✅ Para ajustar delays globalmente, edite `src/config.py`
+
+**Exemplo CORRETO**:
+```python
+from src.crawler.fipe_crawler import buscar_marcas_carros
+
+# Delay já implementado internamente, não adicione aqui
+marcas = buscar_marcas_carros()
+```
+
+**Exemplo ERRADO**:
+```python
+marcas = buscar_marcas_carros()
+time.sleep(1.0)  # ❌ DUPLICAÇÃO! Delay já existe internamente
 ```
 
 ### 5. Tratamento de Erros
@@ -423,8 +449,15 @@ marcas = cache.get_marcas()  # Busca do Supabase
 
 ### Timeout/Rate Limiting
 
-- **Causa**: Muitas requisições seguidas
-- **Solução**: Aumentar delays (`time.sleep()`) entre requisições
+- **Causa**: Muitas requisições seguidas ou delays insuficientes
+- **Identificação**: Erro 429 (Too Many Requests) nos logs
+- **Solução Imediata**: Scripts já implementam retry automático com delay de 30s
+- **Solução Permanente**: Ajustar delays em `src/config.py` se necessário:
+  ```python
+  def get_delay_padrao():
+      return random.uniform(1.0, 1.5)  # Aumentar de 0.8-1.2s para 1.0-1.5s
+  ```
+- **Monitoramento**: Taxa de erros 429 deve ser < 5% das requisições
 
 ## Gestão de Schema de Banco de Dados
 

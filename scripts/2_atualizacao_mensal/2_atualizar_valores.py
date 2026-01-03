@@ -11,8 +11,8 @@ ROOT_DIR = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 import time
-import random
 from datetime import datetime
+from src.config import DELAY_RATE_LIMIT_429, mes_pt_para_yyyymm, yyyymm_para_mes_display
 from src.crawler.fipe_crawler import buscar_valor_veiculo, obter_codigo_referencia_atual, buscar_tabela_referencia
 from src.cache.fipe_local_cache import FipeLocalCache
 
@@ -33,22 +33,29 @@ def atualizar_valores():
     # Verifica tabela de referência atual
     codigo_ref = obter_codigo_referencia_atual()
     tabelas = buscar_tabela_referencia()
-    mes_referencia = tabelas[0]['Mes'] if tabelas else "desconhecido"
+    mes_referencia_api = tabelas[0]['Mes'] if tabelas else "desconhecido"
     
-    print(f"📅 Tabela de referência: {mes_referencia} (código {codigo_ref})")
+    # Converte para formato YYYYMM (202601)
+    mes_referencia = mes_pt_para_yyyymm(mes_referencia_api)
+    
+    # Formato legível para exibição
+    mes_display = yyyymm_para_mes_display(mes_referencia)
+    
+    print(f"📅 Tabela de referência: {mes_display} (código {codigo_ref})")
     print()
-    print("ℹ️  Este script atualiza os valores de TODOS os veículos cadastrados.")
+    print("ℹ️  Este script atualiza os valores FIPE de TODOS os veículos cadastrados.")
+    print("ℹ️  A FIPE publica novos valores mensalmente para veículos novos e antigos.")
     print("ℹ️  Pode levar várias horas dependendo da quantidade de veículos.")
     print()
     
     # Estatísticas
     stats = {
-        'total_cadastrados': 0,  # Total de veículos cadastrados
-        'total_processar': 0,     # Total a processar (sem valor)
+        'total_veiculos': 0,      # Total de veículos cadastrados (combinações marca+modelo+ano)
+        'ja_atualizados': 0,      # Já possuem valor no mês atual
+        'faltam_atualizar': 0,    # Faltam atualizar no mês atual
         'processados': 0,         # Realmente tentados
-        'valores_atualizados': 0,
-        'valores_novos': 0,
-        'erros': 0
+        'valores_salvos': 0,      # Salvos com sucesso
+        'erros': 0                # Erros durante o processo
     }
     
     try:
@@ -56,7 +63,6 @@ def atualizar_valores():
         print("📊 Buscando veículos cadastrados no banco local...")
         print("-" * 70)
         
-        # Busca do SQLite local
         conn = cache.conn
         cursor = conn.cursor()
         
@@ -65,18 +71,19 @@ def atualizar_valores():
         
         if total_veiculos == 0:
             print("⚠️ Nenhum veículo cadastrado!")
+            print("💡 Execute popular_completo.py primeiro para popular o banco.")
             return
         
-        # Busca o mes_referencia real que está sendo usado (pode ser diferente do formato da API de tabelas)
-        # Pega o que realmente está salvo nos valores_fipe mais recentes
-        cursor.execute('SELECT mes_referencia FROM valores_fipe ORDER BY data_consulta DESC LIMIT 1')
-        mes_salvo = cursor.fetchone()
-        mes_referencia_real = mes_salvo[0] if mes_salvo else mes_referencia
+        print(f"✅ {total_veiculos} veículos cadastrados (combinações de marca+modelo+ano)\n")
+        stats['total_veiculos'] = total_veiculos
         
-        # Conta quantos já têm valores cadastrados (usando o formato real do banco)
-        # Nota: valores_fipe usa ano_modelo + codigo_combustivel, não codigo_ano_combustivel
+        # Verifica quantos JÁ TÊM valores para o mês de referência atual
+        # IMPORTANTE: Cada veículo pode ter múltiplos valores (um por mês)
+        print(f"🔍 Verificando valores já cadastrados para {mes_display}...")
+        print("-" * 70)
+        
         cursor.execute('''
-            SELECT COUNT(*)
+            SELECT COUNT(DISTINCT ma.codigo_marca || '-' || ma.codigo_modelo || '-' || ma.codigo_ano_combustivel)
             FROM modelos_anos ma
             INNER JOIN valores_fipe vf 
                 ON vf.codigo_marca = ma.codigo_marca
@@ -85,10 +92,29 @@ def atualizar_valores():
                 AND vf.mes_referencia = ?
             WHERE ma.codigo_ano_combustivel = 
                 CAST(vf.ano_modelo AS TEXT) || '-' || CAST(vf.codigo_combustivel AS TEXT)
-        ''', (mes_referencia_real,))
-        ja_cadastrados = cursor.fetchone()[0]
+        ''', (mes_referencia,))
+        ja_atualizados = cursor.fetchone()[0]
         
-        # Busca apenas veículos SEM valores cadastrados no mês atual
+        faltam_atualizar = total_veiculos - ja_atualizados
+        
+        print(f"✅ Já atualizados ({mes_display}): {ja_atualizados}")
+        print(f"⏳ Faltam atualizar: {faltam_atualizar}")
+        print()
+        
+        stats['ja_atualizados'] = ja_atualizados
+        stats['faltam_atualizar'] = faltam_atualizar
+        
+        if faltam_atualizar == 0:
+            print("🎉 Todos os veículos já possuem valores atualizados para este mês!")
+            print(f"   Mês de referência: {mes_display}")
+            print("   Nada a fazer.")
+            return
+        
+        # Busca APENAS os veículos que NÃO TÊM valor para o mês atual
+        # Isso permite que o script seja retomado se interrompido
+        print(f"🔄 Buscando valores de {faltam_atualizar} veículos...")
+        print("-" * 70)
+        
         cursor.execute('''
             SELECT ma.codigo_marca, ma.codigo_modelo, ma.tipo_veiculo, ma.codigo_ano_combustivel
             FROM modelos_anos ma
@@ -100,26 +126,35 @@ def atualizar_valores():
                 AND ma.codigo_ano_combustivel = 
                     CAST(vf.ano_modelo AS TEXT) || '-' || CAST(vf.codigo_combustivel AS TEXT)
             WHERE vf.codigo_marca IS NULL
-        ''', (mes_referencia_real,))
+            ORDER BY 
+                CAST(SUBSTR(ma.codigo_ano_combustivel, 1, INSTR(ma.codigo_ano_combustivel, '-') - 1) AS INTEGER) DESC,
+                ma.codigo_marca, 
+                ma.codigo_modelo
+        ''', (mes_referencia,))
         veiculos = cursor.fetchall()
         
-        total_processar = len(veiculos)
+        print(f"🚗 {len(veiculos)} veículos para processar\n")
         
-        print(f"📊 Total de veículos cadastrados: {total_veiculos}")
-        print(f"✅ Já possuem valores ({mes_referencia_real}): {ja_cadastrados}")
-        print(f"⏳ Faltam processar: {total_processar}")
-        print()
+        # Pré-processa veículos para contar por ano
+        print("📊 Analisando distribuição por ano...")
+        veiculos_por_ano = {}
+        for veiculo in veiculos:
+            codigo_ano_combustivel = veiculo[3]
+            if '-' in codigo_ano_combustivel:
+                ano_modelo = codigo_ano_combustivel.split('-')[0]
+                veiculos_por_ano[ano_modelo] = veiculos_por_ano.get(ano_modelo, 0) + 1
         
-        if total_processar == 0:
-            print("🎉 Todos os veículos já possuem valores atualizados!")
-            print("   Nada a fazer.")
-            return
+        # Mostra distribuição
+        print(f"{'='*70}")
+        for ano_cod in sorted(veiculos_por_ano.keys(), reverse=True):
+            ano_display = "Zero Km" if ano_cod == "32000" else ano_cod
+            print(f"  • {ano_display}: {veiculos_por_ano[ano_cod]} veículos")
+        print(f"{'='*70}\n")
         
-        stats['total_cadastrados'] = total_veiculos
-        stats['total_processar'] = total_processar
-        
-        print(f"🔄 Processando {total_processar} veículos sem valores...")
-        print("-" * 70)
+        # Controle de ano atual para logs informativos
+        ano_atual_processamento = None
+        contador_ano_atual = 0
+        total_ano_atual = 0
         
         for i, veiculo in enumerate(veiculos, 1):
                 codigo_marca = veiculo[0]
@@ -130,6 +165,27 @@ def atualizar_valores():
                 # Extrai ano e combustível do código (formato: "2024-1" ou "32000-6")
                 if '-' in codigo_ano_combustivel:
                     ano_modelo, codigo_combustivel = codigo_ano_combustivel.split('-')
+                    
+                    # Log quando mudar de ano
+                    if ano_modelo != ano_atual_processamento:
+                        if ano_atual_processamento is not None:
+                            # Mostra estatísticas do ano anterior
+                            ano_display_anterior = "Zero Km" if ano_atual_processamento == "32000" else ano_atual_processamento
+                            print(f"\n    ✅ Ano {ano_display_anterior}: {contador_ano_atual}/{total_ano_atual} veículos processados")
+                            print()
+                        
+                        ano_atual_processamento = ano_modelo
+                        contador_ano_atual = 0
+                        total_ano_atual = veiculos_por_ano.get(ano_modelo, 0)
+                        
+                        # Nome amigável do ano
+                        ano_display = "Zero Km" if ano_modelo == "32000" else ano_modelo
+                        print(f"\n{'='*70}")
+                        print(f"🚗 Processando veículos: {ano_display} ({total_ano_atual} veículos)")
+                        print(f"{'='*70}\n")
+                    
+                    # Incrementa contador do ano
+                    contador_ano_atual += 1
                 else:
                     print(f"    ⚠️ Formato inválido: {codigo_ano_combustivel}")
                     stats['erros'] += 1
@@ -138,11 +194,17 @@ def atualizar_valores():
                 # Incrementa contador de processados
                 stats['processados'] += 1
                 
-                # Mostra progresso a cada 10 veículos
-                if i % 10 == 0 or i == 1:
-                    percentual = (i * 100) // total_processar
-                    processados = stats['valores_atualizados'] + stats['erros']
-                    print(f"    📊 Progresso: {i}/{total_processar} ({percentual}%) | ✅ {stats['valores_atualizados']} salvos | ❌ {stats['erros']} erros | 🔄 {i - processados} em andamento")
+                # Mostra progresso a cada 10 veículos (relativo ao ano)
+                if contador_ano_atual % 10 == 0 or contador_ano_atual == 1:
+                    percentual = (contador_ano_atual * 100) // total_ano_atual if total_ano_atual > 0 else 0
+                    print(f"    📊 [{contador_ano_atual}/{total_ano_atual}] {percentual}% | ✅ {stats['valores_salvos']} salvos | ❌ {stats['erros']} erros")
+                    
+                    # Debug: mostra último mes_referencia salvo
+                    if i == 1:
+                        cursor.execute('SELECT mes_referencia FROM valores_fipe ORDER BY data_consulta DESC LIMIT 1')
+                        ultimo_mes = cursor.fetchone()
+                        if ultimo_mes:
+                            print(f"    🔍 Último mês salvo no banco: {ultimo_mes[0]}")
                 
                 try:
                     # Busca valor atualizado da API FIPE (passa codigo_ref para evitar chamadas extras)
@@ -171,7 +233,7 @@ def atualizar_valores():
                             'modelo': valor.get('Modelo'),
                             'combustivel': valor.get('Combustivel'),
                             'codigo_fipe': valor.get('CodigoFipe'),
-                            'mes_referencia': valor.get('MesReferencia'),
+                            'mes_referencia': mes_pt_para_yyyymm(valor.get('MesReferencia')),  # Converte para YYYYMM
                             'codigo_referencia': codigo_ref,
                             'data_consulta': datetime.now().isoformat()
                         }
@@ -185,23 +247,22 @@ def atualizar_valores():
                         
                         # Salva no SQLite local (sem commit imediato)
                         cache.save_valor_fipe(valor_data, commit=False)
-                        stats['valores_atualizados'] += 1
+                        stats['valores_salvos'] += 1
                         
                         # Commit a cada 10 registros para salvar progresso
-                        if stats['valores_atualizados'] % 10 == 0:
+                        if stats['valores_salvos'] % 10 == 0:
                             cache.conn.commit()
                     else:
                         # API retornou mas sem valor (veículo descontinuado ou sem preço)
                         stats['erros'] += 1
                     
-                    # Delay entre requisições (0.8-1.2s - reduzido após otimização)
-                    time.sleep(random.uniform(0.8, 1.2))
+                    # Delay já implementado em buscar_valor_veiculo() no fipe_crawler.py
                 
                 except Exception as e:
                     if "429" in str(e) or "too many" in str(e).lower():
                         # Rate limit atingido - espera mais tempo
-                        print(f"    ⚠️ Rate limit atingido. Aguardando 30s...")
-                        time.sleep(30)
+                        print(f"    ⚠️ Rate limit atingido. Aguardando {DELAY_RATE_LIMIT_429}s...")
+                        time.sleep(DELAY_RATE_LIMIT_429)
                         
                         # Tenta novamente
                         try:
@@ -210,12 +271,14 @@ def atualizar_valores():
                                 codigo_modelo, 
                                 ano_modelo, 
                                 codigo_combustivel,
+                                tipo_veiculo,  # IMPORTANTE: faltava tipo_veiculo no retry!
                                 codigo_ref  # Passa codigo_ref também no retry
                             )
                             if valor:
                                 valor_data = {
                                     'codigo_marca': int(codigo_marca),
                                     'codigo_modelo': int(codigo_modelo),
+                                    'tipo_veiculo': int(tipo_veiculo),  # IMPORTANTE: faltava!
                                     'ano_modelo': int(ano_modelo),
                                     'codigo_combustivel': int(codigo_combustivel),
                                     'valor': valor.get('Valor'),
@@ -223,7 +286,7 @@ def atualizar_valores():
                                     'modelo': valor.get('Modelo'),
                                     'combustivel': valor.get('Combustivel'),
                                     'codigo_fipe': valor.get('CodigoFipe'),
-                                    'mes_referencia': valor.get('MesReferencia'),
+                                    'mes_referencia': mes_pt_para_yyyymm(valor.get('MesReferencia')),  # Converte para YYYYMM
                                     'codigo_referencia': codigo_ref,
                                     'data_consulta': datetime.now().isoformat()
                                 }
@@ -234,10 +297,10 @@ def atualizar_valores():
                                 except:
                                     valor_data['valor_numerico'] = 0.0
                                 cache.save_valor_fipe(valor_data, commit=False)
-                                stats['valores_atualizados'] += 1
+                                stats['valores_salvos'] += 1
                                 
                                 # Commit a cada 10 registros
-                                if stats['valores_atualizados'] % 10 == 0:
+                                if stats['valores_salvos'] % 10 == 0:
                                     cache.conn.commit()
                         except Exception as retry_error:
                             print(f"    ❌ Erro após retry: {retry_error}")
@@ -250,19 +313,38 @@ def atualizar_valores():
                     stats['processados'] += 1
                     continue
         
+        # Log do último ano processado
+        if ano_atual_processamento:
+            ano_display = "Zero Km" if ano_atual_processamento == "32000" else ano_atual_processamento
+            print(f"\n    ✅ Ano {ano_display}: {contador_ano_atual}/{total_ano_atual} veículos processados")
+        
+        # COMMIT FINAL - CRUCIAL para persistir dados!
+        print("\n💾 Salvando todos os dados no banco...")
+        cache.conn.commit()
+        print("✅ Commit final realizado!\n")
+        
         # Resumo final
         print("\n" + "=" * 70)
         print("✅ ATUALIZAÇÃO DE VALORES CONCLUÍDA!")
         print("=" * 70)
         print()
         print(f"📊 ESTATÍSTICAS:")
-        print(f"   • Veículos cadastrados: {stats['total_cadastrados']}")
-        print(f"   • Faltavam processar: {stats['total_processar']}")
-        print(f"   • Realmente processados: {stats['processados']}")
-        print(f"   • Valores atualizados: {stats['valores_atualizados']}")
+        print(f"   • Veículos cadastrados: {stats['total_veiculos']}")
+        print(f"   • Já atualizados ({mes_display}): {stats['ja_atualizados']}")
+        print(f"   • Processados agora: {stats['processados']}")
+        print(f"   • Valores salvos: {stats['valores_salvos']}")
         print(f"   • Erros: {stats['erros']}")
         print()
-        print(f"📅 Referência: {mes_referencia}")
+        
+        # Mostra resumo por ano
+        if veiculos_por_ano:
+            print(f"📅 VEÍCULOS PROCESSADOS POR ANO:")
+            for ano_cod in sorted(veiculos_por_ano.keys(), reverse=True):
+                ano_display = "Zero Km" if ano_cod == "32000" else ano_cod
+                qtd = veiculos_por_ano[ano_cod]
+                print(f"   • {ano_display}: {qtd} veículos")
+            print()
+        print(f"📅 Referência: {mes_display}")
         print("💾 Todos os valores foram salvos no SQLite local (fipe_local.db)!")
         print("💡 Execute upload_para_supabase.py para enviar ao Supabase.")
         print()
@@ -270,8 +352,8 @@ def atualizar_valores():
     except KeyboardInterrupt:
         print("\n\n⚠️ Processo interrompido pelo usuário")
         print(f"📊 Estatísticas parciais:")
-        print(f"   • Realmente processados: {stats['processados']}")
-        print(f"   • Valores atualizados: {stats['valores_atualizados']}")
+        print(f"   • Processados: {stats['processados']}")
+        print(f"   • Valores salvos: {stats['valores_salvos']}")
         print(f"   • Erros: {stats['erros']}")
         print()
         
@@ -295,8 +377,8 @@ def atualizar_valores():
         
         print()
         print(f"📊 Estatísticas parciais:")
-        print(f"   • Realmente processados: {stats['processados']}")
-        print(f"   • Valores atualizados: {stats['valores_atualizados']}")
+        print(f"   • Processados: {stats['processados']}")
+        print(f"   • Valores salvos: {stats['valores_salvos']}")
         print()
 
 
