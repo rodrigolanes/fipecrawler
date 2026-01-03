@@ -11,6 +11,7 @@ ROOT_DIR = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 import time
+import csv
 from datetime import datetime
 from src.config import DELAY_RATE_LIMIT_429, mes_pt_para_yyyymm, yyyymm_para_mes_display
 from src.crawler.fipe_crawler import buscar_valor_veiculo, obter_codigo_referencia_atual, buscar_tabela_referencia
@@ -25,9 +26,21 @@ def atualizar_valores():
     """
     cache = FipeLocalCache()
     
+    # Arquivo CSV para registrar descontinuados
+    csv_descontinuados = ROOT_DIR / 'logs' / f'descontinuados_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
+    csv_descontinuados.parent.mkdir(exist_ok=True)
+    
+    # Abre arquivo CSV para escrita
+    csv_file = open(csv_descontinuados, 'w', newline='', encoding='utf-8')
+    csv_writer = csv.writer(csv_file)
+    csv_writer.writerow(['codigo_marca', 'codigo_modelo', 'tipo_veiculo', 'ano_modelo', 'codigo_combustivel', 
+                         'nome_marca', 'nome_modelo', 'data_verificacao'])
+    
     print("=" * 70)
     print("FIPE CRAWLER - Atualização Completa de Valores")
     print("=" * 70)
+    print()
+    print(f"📝 Descontinuados serão registrados em: {csv_descontinuados.name}")
     print()
     
     # Verifica tabela de referência atual
@@ -55,6 +68,7 @@ def atualizar_valores():
         'faltam_atualizar': 0,    # Faltam atualizar no mês atual
         'processados': 0,         # Realmente tentados
         'valores_salvos': 0,      # Salvos com sucesso
+        'descontinuados': 0,      # Não existem mais na API FIPE
         'erros': 0                # Erros durante o processo
     }
     
@@ -162,6 +176,16 @@ def atualizar_valores():
                 tipo_veiculo = veiculo[2]
                 codigo_ano_combustivel = veiculo[3]
                 
+                # Busca nomes da marca e modelo para logs
+                cursor.execute('SELECT nome FROM marcas WHERE codigo = ? AND tipo_veiculo = ?', (codigo_marca, tipo_veiculo))
+                marca_row = cursor.fetchone()
+                nome_marca = marca_row[0] if marca_row else f"Marca {codigo_marca}"
+                
+                cursor.execute('SELECT nome FROM modelos WHERE codigo = ? AND codigo_marca = ? AND tipo_veiculo = ?', 
+                             (codigo_modelo, codigo_marca, tipo_veiculo))
+                modelo_row = cursor.fetchone()
+                nome_modelo = modelo_row[0] if modelo_row else f"Modelo {codigo_modelo}"
+                
                 # Extrai ano e combustível do código (formato: "2024-1" ou "32000-6")
                 if '-' in codigo_ano_combustivel:
                     ano_modelo, codigo_combustivel = codigo_ano_combustivel.split('-')
@@ -197,7 +221,7 @@ def atualizar_valores():
                 # Mostra progresso a cada 10 veículos (relativo ao ano)
                 if contador_ano_atual % 10 == 0 or contador_ano_atual == 1:
                     percentual = (contador_ano_atual * 100) // total_ano_atual if total_ano_atual > 0 else 0
-                    print(f"    📊 [{contador_ano_atual}/{total_ano_atual}] {percentual}% | ✅ {stats['valores_salvos']} salvos | ❌ {stats['erros']} erros")
+                    print(f"    📊 [{contador_ano_atual}/{total_ano_atual}] {percentual}% | ✅ {stats['valores_salvos']} salvos | ⏭️ {stats['descontinuados']} descont. | ❌ {stats['erros']} erros")
                     
                     # Debug: mostra último mes_referencia salvo
                     if i == 1:
@@ -254,7 +278,20 @@ def atualizar_valores():
                             cache.conn.commit()
                     else:
                         # API retornou mas sem valor (veículo descontinuado ou sem preço)
-                        stats['erros'] += 1
+                        # Isso é normal - a FIPE remove modelos antigos/descontinuados
+                        stats['descontinuados'] += 1
+                        
+                        # Registra no CSV
+                        csv_writer.writerow([
+                            codigo_marca, codigo_modelo, tipo_veiculo, ano_modelo, codigo_combustivel,
+                            nome_marca, nome_modelo, datetime.now().isoformat()
+                        ])
+                        csv_file.flush()  # Garante gravação imediata
+                        
+                        # Log apenas a cada 50 descontinuados (evita poluição)
+                        if stats['descontinuados'] % 50 == 1:
+                            ano_display = "Zero Km" if ano_modelo == "32000" else ano_modelo
+                            print(f"    ⏭️ {nome_marca} {nome_modelo} {ano_display} - Descontinuado/Não disponível na API")
                     
                     # Delay já implementado em buscar_valor_veiculo() no fipe_crawler.py
                 
@@ -303,10 +340,12 @@ def atualizar_valores():
                                 if stats['valores_salvos'] % 10 == 0:
                                     cache.conn.commit()
                         except Exception as retry_error:
-                            print(f"    ❌ Erro após retry: {retry_error}")
+                            ano_display = "Zero Km" if ano_modelo == "32000" else ano_modelo
+                            print(f"    ❌ {nome_marca} {nome_modelo} {ano_display} - Erro após retry: {retry_error}")
                             stats['erros'] += 1
                     else:
-                        print(f"    ❌ Erro ao buscar valor: {e}")
+                        ano_display = "Zero Km" if ano_modelo == "32000" else ano_modelo
+                        print(f"    ❌ {nome_marca} {nome_modelo} {ano_display} - Erro: {e}")
                         stats['erros'] += 1
                     
                     # Incrementa processados mesmo em caso de erro
@@ -333,6 +372,7 @@ def atualizar_valores():
         print(f"   • Já atualizados ({mes_display}): {stats['ja_atualizados']}")
         print(f"   • Processados agora: {stats['processados']}")
         print(f"   • Valores salvos: {stats['valores_salvos']}")
+        print(f"   • Descontinuados (não disponíveis na API): {stats['descontinuados']}")
         print(f"   • Erros: {stats['erros']}")
         print()
         
@@ -348,12 +388,19 @@ def atualizar_valores():
         print("💾 Todos os valores foram salvos no SQLite local (fipe_local.db)!")
         print("💡 Execute upload_para_supabase.py para enviar ao Supabase.")
         print()
+        
+        if stats['descontinuados'] > 0:
+            print(f"📝 {stats['descontinuados']} veículos descontinuados registrados em:")
+            print(f"   {csv_descontinuados}")
+            print(f"💡 Execute verificar_descontinuados.py para validar e remover do banco.")
+            print()
     
     except KeyboardInterrupt:
         print("\n\n⚠️ Processo interrompido pelo usuário")
         print(f"📊 Estatísticas parciais:")
         print(f"   • Processados: {stats['processados']}")
         print(f"   • Valores salvos: {stats['valores_salvos']}")
+        print(f"   • Descontinuados: {stats['descontinuados']}")
         print(f"   • Erros: {stats['erros']}")
         print()
         
@@ -361,6 +408,9 @@ def atualizar_valores():
         print("💾 Salvando alterações finais...")
         cache.conn.commit()
         print("✅ Dados salvos no SQLite!")
+        
+        # Fecha CSV
+        csv_file.close()
     
     except Exception as e:
         print(f"\n\n❌ Erro fatal: {e}")
@@ -379,7 +429,11 @@ def atualizar_valores():
         print(f"📊 Estatísticas parciais:")
         print(f"   • Processados: {stats['processados']}")
         print(f"   • Valores salvos: {stats['valores_salvos']}")
+        print(f"   • Descontinuados: {stats['descontinuados']}")
         print()
+        
+        # Fecha CSV
+        csv_file.close()
 
 
 if __name__ == "__main__":

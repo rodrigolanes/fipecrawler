@@ -32,6 +32,9 @@ Thumbs.db
 *.sqlite
 *.sqlite3
 
+# Logs e relatórios
+logs/
+
 # Scripts de teste temporários
 tests/
 !tests/__init__.py
