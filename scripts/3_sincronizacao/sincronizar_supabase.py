@@ -3,7 +3,14 @@ Script para carregar dados do SQLite local para o Supabase.
 Útil após popular o banco localmente com popular_banco_otimizado.py
 """
 import sys
+import os
 from pathlib import Path
+
+# Configurar encoding UTF-8 para o stdout (Windows)
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # Adiciona o diretório raiz ao path
 ROOT_DIR = Path(__file__).parent.parent.parent
@@ -384,17 +391,251 @@ class SupabaseUploader:
             status = "✅" if sqlite_count == supabase_count else "⚠️"
             print(f"{status} {tabela:20s} | SQLite: {sqlite_count:6d} | Supabase: {supabase_count:6d}")
     
+    def limpar_valores_fipe_orfaos(self):
+        """Remove valores FIPE que não existem mais no SQLite"""
+        print("\n🧹 LIMPEZA DE VALORES FIPE")
+        print("-" * 60)
+        
+        try:
+            # Busca todas as PKs do SQLite
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                SELECT codigo_marca, codigo_modelo, tipo_veiculo, ano_modelo, 
+                       codigo_combustivel, mes_referencia
+                FROM valores_fipe
+            ''')
+            sqlite_keys = {
+                (row['codigo_marca'], row['codigo_modelo'], row['tipo_veiculo'], 
+                 row['ano_modelo'], row['codigo_combustivel'], row['mes_referencia'])
+                for row in cursor.fetchall()
+            }
+            print(f"   📊 {len(sqlite_keys)} registros no SQLite")
+            
+            # Busca todos os registros do Supabase (em lotes)
+            print("   🌐 Buscando registros do Supabase...")
+            supabase_data = []
+            offset = 0
+            batch_size = 1000
+            
+            while True:
+                response = self.supabase.table('valores_fipe').select(
+                    'codigo_marca,codigo_modelo,tipo_veiculo,ano_modelo,codigo_combustivel,mes_referencia'
+                ).range(offset, offset + batch_size - 1).execute()
+                
+                if not response.data:
+                    break
+                    
+                supabase_data.extend(response.data)
+                offset += batch_size
+                
+                if len(response.data) < batch_size:
+                    break
+            
+            supabase_keys = {
+                (r['codigo_marca'], r['codigo_modelo'], r['tipo_veiculo'],
+                 r['ano_modelo'], r['codigo_combustivel'], r['mes_referencia'])
+                for r in supabase_data
+            }
+            print(f"   📊 {len(supabase_keys)} registros no Supabase")
+            
+            # Registros que existem no Supabase mas não no SQLite
+            para_deletar = supabase_keys - sqlite_keys
+            
+            if not para_deletar:
+                print("   ✅ Nenhum registro órfão encontrado")
+                return 0
+            
+            print(f"   🗑️  {len(para_deletar)} registros para deletar")
+            
+            # Deleta em lotes
+            deletados = 0
+            for keys in para_deletar:
+                try:
+                    self.supabase.table('valores_fipe').delete().match({
+                        'codigo_marca': keys[0],
+                        'codigo_modelo': keys[1],
+                        'tipo_veiculo': keys[2],
+                        'ano_modelo': keys[3],
+                        'codigo_combustivel': keys[4],
+                        'mes_referencia': keys[5]
+                    }).execute()
+                    deletados += 1
+                    if deletados % 100 == 0:
+                        print(f"   🗑️  {deletados}/{len(para_deletar)} deletados ({deletados*100//len(para_deletar)}%)")
+                except Exception as e:
+                    print(f"   ❌ Erro ao deletar {keys}: {e}")
+            
+            print(f"   ✅ {deletados} registros deletados")
+            return deletados
+            
+        except Exception as e:
+            print(f"   ❌ Erro ao limpar valores FIPE: {e}")
+            return 0
+    
+    def limpar_modelos_anos_orfaos(self):
+        """Remove relacionamentos modelo-ano que não existem mais no SQLite"""
+        print("\n🧹 LIMPEZA DE RELACIONAMENTOS MODELO-ANO")
+        print("-" * 60)
+        
+        try:
+            # Busca todas as PKs do SQLite
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                SELECT codigo_marca, codigo_modelo, tipo_veiculo, codigo_ano_combustivel
+                FROM modelos_anos
+            ''')
+            sqlite_keys = {
+                (row['codigo_marca'], row['codigo_modelo'], row['tipo_veiculo'], row['codigo_ano_combustivel'])
+                for row in cursor.fetchall()
+            }
+            print(f"   📊 {len(sqlite_keys)} registros no SQLite")
+            
+            # Busca todos os registros do Supabase (em lotes)
+            print("   🌐 Buscando registros do Supabase...")
+            supabase_data = []
+            offset = 0
+            batch_size = 1000
+            
+            while True:
+                response = self.supabase.table('modelos_anos').select(
+                    'codigo_marca,codigo_modelo,tipo_veiculo,codigo_ano_combustivel'
+                ).range(offset, offset + batch_size - 1).execute()
+                
+                if not response.data:
+                    break
+                    
+                supabase_data.extend(response.data)
+                offset += batch_size
+                print(f"      Carregados {len(supabase_data)} registros...")
+                
+                if len(response.data) < batch_size:
+                    break
+            
+            supabase_keys = {
+                (r['codigo_marca'], r['codigo_modelo'], r['tipo_veiculo'], r['codigo_ano_combustivel'])
+                for r in supabase_data
+            }
+            print(f"   📊 {len(supabase_keys)} registros no Supabase")
+            
+            # Registros que existem no Supabase mas não no SQLite
+            para_deletar = supabase_keys - sqlite_keys
+            
+            if not para_deletar:
+                print("   ✅ Nenhum registro órfão encontrado")
+                return 0
+            
+            print(f"   🗑️  {len(para_deletar)} registros para deletar")
+            
+            # Deleta em lotes
+            deletados = 0
+            for keys in para_deletar:
+                try:
+                    self.supabase.table('modelos_anos').delete().match({
+                        'codigo_marca': keys[0],
+                        'codigo_modelo': keys[1],
+                        'tipo_veiculo': keys[2],
+                        'codigo_ano_combustivel': keys[3]
+                    }).execute()
+                    deletados += 1
+                    if deletados % 100 == 0:
+                        print(f"   🗑️  {deletados}/{len(para_deletar)} deletados ({deletados*100//len(para_deletar)}%)")
+                except Exception as e:
+                    print(f"   ❌ Erro ao deletar {keys}: {e}")
+            
+            print(f"   ✅ {deletados} registros deletados")
+            return deletados
+            
+        except Exception as e:
+            print(f"   ❌ Erro ao limpar modelos_anos: {e}")
+            return 0
+    
+    def limpar_modelos_orfaos(self):
+        """Remove modelos que não existem mais no SQLite"""
+        print("\n🧹 LIMPEZA DE MODELOS")
+        print("-" * 60)
+        
+        try:
+            # Busca todas as PKs do SQLite
+            cursor = self.conn.cursor()
+            cursor.execute('SELECT codigo, codigo_marca, tipo_veiculo FROM modelos')
+            sqlite_keys = {
+                (row['codigo'], row['codigo_marca'], row['tipo_veiculo'])
+                for row in cursor.fetchall()
+            }
+            print(f"   📊 {len(sqlite_keys)} registros no SQLite")
+            
+            # Busca todos os registros do Supabase (em lotes)
+            print("   🌐 Buscando registros do Supabase...")
+            supabase_data = []
+            offset = 0
+            batch_size = 1000
+            
+            while True:
+                response = self.supabase.table('modelos').select(
+                    'codigo,codigo_marca,tipo_veiculo'
+                ).range(offset, offset + batch_size - 1).execute()
+                
+                if not response.data:
+                    break
+                    
+                supabase_data.extend(response.data)
+                offset += batch_size
+                
+                if len(response.data) < batch_size:
+                    break
+            
+            supabase_keys = {
+                (r['codigo'], r['codigo_marca'], r['tipo_veiculo'])
+                for r in supabase_data
+            }
+            print(f"   📊 {len(supabase_keys)} registros no Supabase")
+            
+            # Registros que existem no Supabase mas não no SQLite
+            para_deletar = supabase_keys - sqlite_keys
+            
+            if not para_deletar:
+                print("   ✅ Nenhum registro órfão encontrado")
+                return 0
+            
+            print(f"   🗑️  {len(para_deletar)} registros para deletar")
+            
+            # Deleta individualmente
+            deletados = 0
+            for keys in para_deletar:
+                try:
+                    self.supabase.table('modelos').delete().match({
+                        'codigo': keys[0],
+                        'codigo_marca': keys[1],
+                        'tipo_veiculo': keys[2]
+                    }).execute()
+                    deletados += 1
+                    if deletados % 50 == 0:
+                        print(f"   🗑️  {deletados}/{len(para_deletar)} deletados ({deletados*100//len(para_deletar)}%)")
+                except Exception as e:
+                    print(f"   ❌ Erro ao deletar {keys}: {e}")
+            
+            print(f"   ✅ {deletados} registros deletados")
+            return deletados
+            
+        except Exception as e:
+            print(f"   ❌ Erro ao limpar modelos: {e}")
+            return 0
+    
     def upload_completo(self):
-        """Executa upload completo de todas as tabelas"""
+        """Executa sincronização completa: upload + limpeza"""
         print("=" * 60)
-        print("🚀 UPLOAD SQLite → Supabase")
+        print("🔄 SINCRONIZAÇÃO SQLite ↔ Supabase")
         print("=" * 60)
         print(f"📂 Banco local: {self.db_path}")
         print(f"📦 Tamanho do lote: {self.batch_size}")
         
         inicio = time.time()
         
-        # Ordem correta: respeitar foreign keys
+        # FASE 1: Upload (adicionar/atualizar)
+        print("\n" + "=" * 60)
+        print("📤 FASE 1: UPLOAD DE DADOS")
+        print("=" * 60)
+        
         stats = {}
         stats['tabelas_referencia'] = self.upload_tabelas_referencia()
         stats['marcas'] = self.upload_marcas()
@@ -403,17 +644,38 @@ class SupabaseUploader:
         stats['modelos_anos'] = self.upload_modelos_anos()
         stats['valores_fipe'] = self.upload_valores_fipe()
         
+        # FASE 2: Limpeza (remover órfãos)
+        print("\n" + "=" * 60)
+        print("🧹 FASE 2: LIMPEZA DE DADOS ÓRFÃOS")
+        print("=" * 60)
+        
+        deletados = {}
+        deletados['valores_fipe'] = self.limpar_valores_fipe_orfaos()
+        deletados['modelos_anos'] = self.limpar_modelos_anos_orfaos()
+        deletados['modelos'] = self.limpar_modelos_orfaos()
+        
         tempo_total = time.time() - inicio
         
         # Estatísticas finais
         self.mostrar_estatisticas()
         
         print("\n" + "=" * 60)
-        print("⏱️  TEMPO DE UPLOAD")
+        print("📊 RESUMO DA SINCRONIZAÇÃO")
+        print("=" * 60)
+        print("\n📤 Registros enviados:")
+        for tabela, count in stats.items():
+            print(f"   {tabela:25s}: {count:6d}")
+        
+        print("\n🗑️  Registros deletados:")
+        for tabela, count in deletados.items():
+            print(f"   {tabela:25s}: {count:6d}")
+        
+        print("\n" + "=" * 60)
+        print("⏱️  TEMPO DE SINCRONIZAÇÃO")
         print("=" * 60)
         print(f"Tempo total: {tempo_total:.1f}s ({tempo_total/60:.1f} minutos)")
         print()
-        print("✅ Upload concluído!")
+        print("✅ Sincronização concluída!")
     
     def close(self):
         """Fecha conexão SQLite"""

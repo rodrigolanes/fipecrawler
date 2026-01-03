@@ -31,7 +31,7 @@ def get_supabase_client() -> Client:
             )
         
         _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        print("✅ Conexão com Supabase estabelecida")
+        print("[OK] Conexao com Supabase estabelecida")
     
     return _supabase_client
 
